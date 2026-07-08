@@ -21,6 +21,8 @@ from pydantic import BaseModel
 from rapidocr import RapidOCR
 
 from pdf_service import PageView, WordBox, normalise_rect
+from feedback_store import apply_local_calibration
+from redaction_knowledge import compact_examples, compact_playbook
 
 load_dotenv()
 
@@ -51,6 +53,9 @@ CATEGORY_LABELS: dict[str, str] = {
     "private_chat": "Private chat message / panel",
     "authentication_code": "Authentication code",
     "qr_code": "QR code",
+    "general_url": "Link / URL",
+    "person_image": "Person / face image",
+    "custom_request": "Custom request",
 }
 
 VALID_CATEGORIES = set(CATEGORY_LABELS)
@@ -500,9 +505,231 @@ def _valid_ip(value: str) -> bool:
         return False
 
 
+NAME_WORD_RE = r"[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’.-]*"
+NAME_VALUE_RE = rf"{NAME_WORD_RE}(?:\s+{NAME_WORD_RE}){{1,4}}"
+NAME_LABEL_RE = re.compile(
+    rf"(?i)\b(?:full\s+name|applicant(?:'s)?\s+name|candidate(?:'s)?\s+name|student\s+name|"
+    rf"employee\s+name|customer\s+name|account\s+holder(?:\s+name)?|patient\s+name|tenant\s+name|"
+    rf"contact\s+name|name)\b\s*[:#=-]?\s*({NAME_VALUE_RE})\s*$"
+)
+ADDRESS_LABEL_RE = re.compile(
+    r"(?i)^\s*(?:home|residential|postal|mailing|billing|delivery|correspondence|current|permanent)?\s*address\b\s*[:#=-]?\s*(.*)$"
+)
+UK_POSTCODE_RE = re.compile(r"(?i)\b(?:GIR\s?0AA|[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2})\b")
+US_ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
+STREET_RE = re.compile(
+    r"(?i)\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|lane|ln\.?|drive|dr\.?|close|court|ct\.?|"
+    r"way|crescent|gardens?|grove|place|square|terrace|park|hill|mews|walk|row|boulevard|blvd\.?|"
+    r"highway|hwy\.?|rise|view|gate|bank|quay)\b"
+)
+ADDRESS_STOP_LABEL_RE = re.compile(
+    r"(?i)^\s*(?:email|e-mail|phone|telephone|mobile|dob|date\s+of\s+birth|student\s+id|employee\s+id|"
+    r"account|username|password|nationality|gender|company|organisation|department)\b\s*[:#=-]"
+)
+NAME_HEADING_STOP_WORDS = {
+    "address", "application", "applicant", "candidate", "company", "contact", "curriculum", "details",
+    "document", "education", "electrical", "employee", "engineer", "engineering", "experience", "invoice",
+    "manager", "personal", "profile", "project", "report", "resume", "statement", "student", "summary",
+    "university", "vitae", "work",
+}
+
+
+def _tokens_text(tokens: Sequence[AnalysisToken]) -> str:
+    return " ".join(token.text for token in tokens).strip()
+
+
+def _looks_like_person_name(value: str) -> bool:
+    value = re.sub(r"\s+", " ", value).strip(" ,:;-\t")
+    words = value.split()
+    if not 2 <= len(words) <= 5 or any(any(char.isdigit() for char in word) for word in words):
+        return False
+    if any(word.lower().strip(".'’-") in NAME_HEADING_STOP_WORDS for word in words):
+        return False
+    for word in words:
+        clean = word.strip(".'’- ")
+        if len(clean) < 2 or not re.fullmatch(NAME_WORD_RE, clean):
+            return False
+        if not (clean[0].isupper() or clean.isupper()):
+            return False
+    return True
+
+
+def _add_token_suggestion(
+    suggestions: list[SensitiveSuggestion],
+    *,
+    page_index: int,
+    category: str,
+    tokens: Sequence[AnalysisToken],
+    confidence: float,
+    reason: str,
+    source: str = "Context detector",
+) -> None:
+    if not tokens:
+        return
+    suggestions.append(
+        _make_suggestion(
+            page_index=page_index,
+            category=category,
+            confidence=_confidence_for_tokens(confidence, tokens),
+            rects=_rects_for_tokens(tokens),
+            raw_preview=_tokens_text(tokens),
+            reason=reason,
+            source=source,
+            token_ids=[token.token_id for token in tokens],
+        )
+    )
+
+
+def contextual_name_and_address_suggestions(
+    lines: Sequence[_TokenLine], page_index: int
+) -> list[SensitiveSuggestion]:
+    """Detect labelled names and postal addresses without relying on the VLM.
+
+    These are deliberately review suggestions, not automatic redactions. The labelled
+    cases are high-confidence; unlabelled document-header names and street addresses
+    are lower-confidence so the user can approve or reject them in the sidebar.
+    """
+
+    suggestions: list[SensitiveSuggestion] = []
+    if not lines:
+        return suggestions
+
+    # Labelled full names, e.g. "Full name: Richmond Kyawzay".
+    for line in lines:
+        match = NAME_LABEL_RE.search(line.text)
+        if not match or not _looks_like_person_name(match.group(1)):
+            continue
+        tokens = _tokens_for_span(line, *match.span(1))
+        _add_token_suggestion(
+            suggestions,
+            page_index=page_index,
+            category="full_name",
+            tokens=tokens,
+            confidence=0.965,
+            reason="A complete personal name appears next to a name-related field label.",
+        )
+
+    # A prominent title-cased line near the top of a CV, application or profile is
+    # often the document owner's name. Requiring larger-than-median text reduces
+    # false positives from ordinary headings.
+    token_heights = [token.rect[3] - token.rect[1] for line in lines for token in line.tokens]
+    median_height = sorted(token_heights)[len(token_heights) // 2] if token_heights else 0.0
+    for line in lines[:6]:
+        candidate = line.text.strip()
+        line_height = sum(token.rect[3] - token.rect[1] for token in line.tokens) / max(len(line.tokens), 1)
+        if not _looks_like_person_name(candidate):
+            continue
+        is_prominent = line_height >= max(median_height * 1.10, median_height + 0.5)
+        is_very_early = lines.index(line) <= 2
+        if is_prominent or is_very_early:
+            _add_token_suggestion(
+                suggestions,
+                page_index=page_index,
+                category="full_name",
+                tokens=line.tokens,
+                confidence=0.76 if is_prominent else 0.68,
+                reason=(
+                    "A prominent personal-name-shaped line appears near the top of the document."
+                    if is_prominent
+                    else "A personal-name-shaped line appears in the document header; it is offered as a review suggestion."
+                ),
+            )
+
+    consumed_address_lines: set[int] = set()
+
+    # Labelled addresses may continue over several lines. Include lines until a
+    # postcode/ZIP is reached or another labelled field begins.
+    for index, line in enumerate(lines):
+        label_match = ADDRESS_LABEL_RE.match(line.text)
+        if not label_match:
+            continue
+        address_tokens = list(_tokens_for_span(line, *label_match.span(1))) if label_match.group(1).strip() else []
+        used_indexes = {index}
+        for next_index in range(index + 1, min(index + 5, len(lines))):
+            next_line = lines[next_index]
+            if ADDRESS_STOP_LABEL_RE.match(next_line.text):
+                break
+            address_tokens.extend(next_line.tokens)
+            used_indexes.add(next_index)
+            combined = _tokens_text(address_tokens)
+            if UK_POSTCODE_RE.search(combined) or US_ZIP_RE.search(combined):
+                break
+        combined = _tokens_text(address_tokens)
+        if address_tokens and (
+            STREET_RE.search(combined)
+            or UK_POSTCODE_RE.search(combined)
+            or US_ZIP_RE.search(combined)
+            or re.search(r"\b\d{1,5}[A-Za-z]?\b", combined)
+        ):
+            _add_token_suggestion(
+                suggestions,
+                page_index=page_index,
+                category="home_address",
+                tokens=address_tokens,
+                confidence=0.965,
+                reason="A postal or residential address appears next to an address field label.",
+            )
+            consumed_address_lines.update(used_indexes)
+
+    # Unlabelled postal addresses: start at a house number/name + street suffix and
+    # include locality/postcode lines immediately beneath it.
+    for index, line in enumerate(lines):
+        if index in consumed_address_lines:
+            continue
+        text = line.text.strip()
+        starts_like_property = bool(re.match(r"(?i)^(?:flat|apartment|apt\.?|unit|suite)?\s*\d{1,5}[A-Za-z]?(?:[-/]\d{1,5}[A-Za-z]?)?\b", text))
+        if not (starts_like_property and STREET_RE.search(text)):
+            continue
+        address_tokens = list(line.tokens)
+        used_indexes = {index}
+        for next_index in range(index + 1, min(index + 4, len(lines))):
+            next_line = lines[next_index]
+            if ADDRESS_STOP_LABEL_RE.match(next_line.text):
+                break
+            # Only attach nearby lines; the line builder is ordered vertically.
+            vertical_gap = min(token.rect[1] for token in next_line.tokens) - max(token.rect[3] for token in lines[next_index - 1].tokens)
+            typical_height = max(token.rect[3] - token.rect[1] for token in line.tokens)
+            if vertical_gap > max(typical_height * 1.8, 18.0):
+                break
+            address_tokens.extend(next_line.tokens)
+            used_indexes.add(next_index)
+            combined = _tokens_text(address_tokens)
+            if UK_POSTCODE_RE.search(combined) or US_ZIP_RE.search(combined):
+                break
+        _add_token_suggestion(
+            suggestions,
+            page_index=page_index,
+            category="home_address",
+            tokens=address_tokens,
+            confidence=0.87 if (UK_POSTCODE_RE.search(_tokens_text(address_tokens)) or US_ZIP_RE.search(_tokens_text(address_tokens))) else 0.81,
+            reason="The text has the structure of a street address, with an optional locality or postcode.",
+        )
+        consumed_address_lines.update(used_indexes)
+
+    # Catch a postcode line whose street line is directly above it.
+    for index, line in enumerate(lines):
+        if index in consumed_address_lines or not (UK_POSTCODE_RE.search(line.text) or US_ZIP_RE.search(line.text)):
+            continue
+        start = max(0, index - 2)
+        candidate_lines = lines[start : index + 1]
+        combined = " ".join(item.text for item in candidate_lines)
+        if STREET_RE.search(combined):
+            address_tokens = [token for item in candidate_lines for token in item.tokens]
+            _add_token_suggestion(
+                suggestions,
+                page_index=page_index,
+                category="home_address",
+                tokens=address_tokens,
+                confidence=0.89,
+                reason="A street line and postal code together form a likely postal address.",
+            )
+
+    return suggestions
+
+
 def local_pattern_suggestions(tokens: Sequence[AnalysisToken], page_index: int) -> list[SensitiveSuggestion]:
     lines = _build_lines(tokens)
-    suggestions: list[SensitiveSuggestion] = []
+    suggestions: list[SensitiveSuggestion] = contextual_name_and_address_suggestions(lines, page_index)
 
     simple_patterns: list[tuple[str, re.Pattern[str], float, str, int]] = [
         (
@@ -832,12 +1059,99 @@ def _vision_prompt_payload(tokens: Sequence[AnalysisToken]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+
+def _custom_prompt_requests_links(custom_instruction: str) -> bool:
+    text = custom_instruction.lower()
+    return any(phrase in text for phrase in (
+        "all links", "every link", "web links", "urls", "url", "hyperlinks", "website links"
+    ))
+
+
+def _custom_prompt_requests_people(custom_instruction: str) -> bool:
+    text = custom_instruction.lower()
+    return any(phrase in text for phrase in (
+        "pictures of people", "photos of people", "images of people", "people in photos",
+        "faces", "face", "portraits", "profile photos", "person images"
+    ))
+
+
+def custom_prompt_local_suggestions(
+    *,
+    custom_instruction: str,
+    tokens: Sequence[AnalysisToken],
+    image: Image.Image,
+    view: PageView,
+    page_index: int,
+) -> list[SensitiveSuggestion]:
+    """Add deterministic helpers for common custom requests.
+
+    The VLM still receives the full instruction for arbitrary targets. These local
+    helpers make requests for all links and human faces more reliable.
+    """
+
+    instruction = custom_instruction.strip()
+    if not instruction:
+        return []
+
+    suggestions: list[SensitiveSuggestion] = []
+    if _custom_prompt_requests_links(instruction):
+        url_pattern = re.compile(r"(?i)(?:https?://|www\.)[^\s<>\"']+")
+        for line in _build_lines(tokens):
+            for match in url_pattern.finditer(line.text):
+                _add_regex_match(
+                    suggestions,
+                    line=line,
+                    match=match,
+                    page_index=page_index,
+                    category="general_url",
+                    base_confidence=0.985,
+                    reason="The user explicitly requested that visible links be redacted.",
+                )
+
+    if _custom_prompt_requests_people(instruction):
+        try:
+            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            detector = cv2.CascadeClassifier(cascade_path)
+            if not detector.empty():
+                rgb = np.asarray(image.convert("RGB"))
+                grey = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+                faces = detector.detectMultiScale(
+                    grey,
+                    scaleFactor=1.08,
+                    minNeighbors=5,
+                    minSize=(32, 32),
+                )
+                for x, y, width, height in faces:
+                    page_rect = _canvas_rect_to_page(
+                        (float(x), float(y), float(x + width), float(y + height)), view
+                    )
+                    if page_rect is None:
+                        continue
+                    suggestions.append(
+                        _make_suggestion(
+                            page_index=page_index,
+                            category="person_image",
+                            confidence=0.84,
+                            rects=[_pad_rect(page_rect, 5.0, view)],
+                            raw_preview="Detected face / portrait",
+                            reason="The user asked to redact pictures of people and a face-like region was detected locally.",
+                            source="OpenCV face detector",
+                        )
+                    )
+        except Exception:
+            # The Fireworks vision model still handles this custom request.
+            pass
+
+    return suggestions
+
+
 def _call_fireworks_vision(
     *,
     image: Image.Image,
     view: PageView,
     tokens: Sequence[AnalysisToken],
     page_index: int,
+    custom_instruction: str = "",
 ) -> tuple[list[SensitiveSuggestion], list[str], bool]:
     api_key = os.getenv("FIREWORKS_API_KEY", "").strip()
     if not api_key:
@@ -853,32 +1167,46 @@ def _call_fireworks_vision(
     page_image = _document_crop(image, view)
     data_url = _image_data_url(page_image)
 
-    system_prompt = """You are a conservative visual privacy detector for a redaction-review application.
-Inspect the document or screenshot image and return JSON only. Identify likely sensitive information, but do not redact anything yourself.
-Allowed categories: email_address, phone_number, home_address, username, full_name, account_number, bank_card_number, api_key, access_token, password, database_connection_string, private_key, ip_address, file_path, sensitive_url, student_id, employee_id, date_of_birth, private_chat, authentication_code, qr_code.
+    custom_instruction = custom_instruction.strip()
+    custom_rule = (
+        "\nCUSTOM REDACTION INSTRUCTION FROM THE USER: " + custom_instruction +
+        "\nTreat this instruction as an additional target. Use general_url for ordinary links, "
+        "person_image for photographs/faces/portraits, or custom_request for other requested targets. "
+        "Do not ignore the standard privacy categories.\n"
+        if custom_instruction
+        else ""
+    )
+    system_prompt = f"""You are a high-recall visual privacy detector for a human-reviewed redaction application.
+Inspect the document or screenshot image and return JSON only. Identify likely sensitive information, but do not redact anything yourself. The user will approve or reject every suggestion, so prefer a calibrated suggestion over silently missing plausible private data.
+Allowed categories: email_address, phone_number, home_address, username, full_name, account_number, bank_card_number, api_key, access_token, password, database_connection_string, private_key, ip_address, file_path, sensitive_url, student_id, employee_id, date_of_birth, private_chat, authentication_code, qr_code, general_url, person_image, custom_request.
 
 Output rules:
 - Return one finding per sensitive value or coherent private visual region.
 - confidence must be a calibrated probability from 0 to 1. Omit weak guesses below 0.55.
-- token_ids must contain only IDs from the supplied token list. Use them whenever the sensitive content corresponds to extracted text because they provide exact word boxes.
-- bbox is [x0,y0,x1,y1] in a 0..1000 coordinate system relative to the supplied image. Use bbox for visual regions, scanned text not represented by tokens, QR codes, private chat bubbles/panels, signatures, or when token boxes are insufficient.
+- token_ids must contain only IDs from the supplied token list. Use them whenever the target corresponds to extracted text because they provide exact word boxes.
+- bbox is [x0,y0,x1,y1] in a 0..1000 coordinate system relative to the supplied image. Use bbox for visual regions, scanned text not represented by tokens, QR codes, faces/photos, private chat panels, signatures, or when token boxes are insufficient.
 - A finding may contain both token_ids and bbox. Do not invent token IDs.
-- Select the sensitive value rather than harmless field labels, except private_chat where a whole message bubble or panel can be selected.
-- full_name: only a complete personal name when it is plausibly private, not a company, product, title, or public organisation.
-- home_address: residential/postal addresses where reasonably detectable.
-- account_number, bank_card_number, credentials, authentication codes, private keys and connection strings should be high priority.
-- sensitive_url: only URLs containing credentials, tokens, session IDs, signatures, one-time codes, or similarly sensitive parameters.
-- private_chat: private DMs, SMS, messaging bubbles or a message panel; use a bbox covering the actual private message content/panel.
-- qr_code: locate every visible QR code even when its payload cannot be decoded.
-- preview must be short and must mask secrets where possible.
-- reason must be a concise explanation.
+- Select the sensitive value rather than harmless field labels, except private_chat where a coherent message bubble or panel can be selected.
+- full_name: include complete personal names in forms, CVs, letters, account pages, messages, signatures and profile headers. Do not return company, product or organisation names.
+- home_address: include house/flat, street, locality/city and postcode where visible; return one coherent finding.
+- sensitive_url is for links carrying credentials, tokens, sessions, signatures or one-time codes. general_url is for ordinary links only when requested.
+- private_chat should cover actual private message content or the coherent message panel.
+- qr_code should locate every visible QR code even when its payload cannot be decoded.
+- person_image should cover the face or portrait/photo region requested by the user.
+- preview must be short and mask secrets where possible.
+- reason must be concise.
+
+DETECTION_PLAYBOOK_JSON={compact_playbook()}
+SYNTHETIC_FEW_SHOT_EXAMPLES_JSON={compact_examples()}
+{custom_rule}
 The response must match the supplied JSON schema."""
 
     text_payload = _vision_prompt_payload(tokens)
     user_text = (
         "Review this page for sensitive information. The optional OCR/embedded-text tokens below may help you "
         "return exact token IDs; also inspect the image itself for visual content and regions not present in OCR.\n\n"
-        f"TOKENS_JSON={text_payload}"
+        + (f"CUSTOM_INSTRUCTION={custom_instruction}\n\n" if custom_instruction else "")
+        + f"TOKENS_JSON={text_payload}"
     )
     messages = [
         {"role": "system", "content": system_prompt},
@@ -1043,6 +1371,7 @@ def analyze_page(
     embedded_words: Sequence[WordBox] = (),
     use_ai: bool = True,
     run_ocr: bool = True,
+    custom_instruction: str = "",
 ) -> AnalysisResult:
     embedded = embedded_tokens(embedded_words, page_index)
     warnings: list[str] = []
@@ -1062,6 +1391,16 @@ def analyze_page(
     except Exception as exc:
         warnings.append(f"QR detection failed on page {page_index + 1}: {exc}")
 
+    suggestions.extend(
+        custom_prompt_local_suggestions(
+            custom_instruction=custom_instruction,
+            tokens=tokens,
+            image=image,
+            view=view,
+            page_index=page_index,
+        )
+    )
+
     ai_used = False
     if use_ai:
         ai_findings, ai_warnings, ai_used = _call_fireworks_vision(
@@ -1069,6 +1408,7 @@ def analyze_page(
             view=view,
             tokens=tokens,
             page_index=page_index,
+            custom_instruction=custom_instruction,
         )
         suggestions.extend(ai_findings)
         warnings.extend(ai_warnings)
@@ -1082,8 +1422,10 @@ def analyze_page(
             y1 = max(rect[3] for rect in suggestion.rects)
             suggestion.rects = [_pad_rect((x0, y0, x1, y1), 6.0, view)]
 
+    merged = _merge_suggestions(suggestions)
+    apply_local_calibration(merged)
     return AnalysisResult(
-        suggestions=_merge_suggestions(suggestions),
+        suggestions=merged,
         warnings=tuple(dict.fromkeys(warnings)),
         token_count=len(tokens),
         ai_used=ai_used,

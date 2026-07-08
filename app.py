@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import copy
 import os
 
 from nicegui import events, run, ui
 
 from ai_service import SensitiveSuggestion, analyze_page
+from feedback_store import record_review_metadata
 from pdf_service import (
     CANVAS_HEIGHT,
     CANVAS_WIDTH,
@@ -31,6 +33,14 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
 @dataclass
+class HistorySnapshot:
+    redactions: dict[int, list[tuple[float, float, float, float]]]
+    suggestion_states: dict[str, tuple[bool, bool]]
+    current_page: int
+    label: str = "Edit"
+
+
+@dataclass
 class EditorState:
     file_bytes: bytes | None = None
     filename: str = "document.pdf"
@@ -45,30 +55,147 @@ class EditorState:
     draft_rect: tuple[float, float, float, float] | None = None
     final_result: RedactionResult | None = None
     ai_suggestions: list[SensitiveSuggestion] = field(default_factory=list)
+    undo_stack: list[HistorySnapshot] = field(default_factory=list)
+    redo_stack: list[HistorySnapshot] = field(default_factory=list)
 
 
 @ui.page("/")
 def main_page() -> None:
     state = EditorState()
 
+    ui.dark_mode(True)
+    ui.colors(
+        primary="#5eead4",
+        secondary="#7dd3fc",
+        accent="#a78bfa",
+        positive="#6ee7b7",
+        negative="#fb7185",
+        warning="#fbbf24",
+        dark="#07151d",
+    )
     ui.add_css(
         """
-        body { background: #f5f7fa; }
-        .app-shell { max-width: 1500px; margin: 0 auto; }
-        .editor-image { width: min(100%, 820px); border-radius: 10px; overflow: hidden; }
-        .preview-image { width: min(100%, 520px); border-radius: 10px; overflow: hidden; }
-        .muted { color: #64748b; }
+        :root {
+            --ink: #e8fbff;
+            --muted: #8faab5;
+            --panel: rgba(9, 28, 37, 0.82);
+            --panel-strong: rgba(8, 23, 31, 0.96);
+            --line: rgba(125, 211, 252, 0.17);
+            --aurora: #5eead4;
+            --aurora-blue: #7dd3fc;
+            --aurora-violet: #a78bfa;
+        }
+        html, body { min-height: 100%; }
+        body {
+            color: var(--ink);
+            background:
+                radial-gradient(circle at 12% 5%, rgba(94,234,212,.15), transparent 30%),
+                radial-gradient(circle at 88% 12%, rgba(125,211,252,.14), transparent 32%),
+                radial-gradient(circle at 58% 90%, rgba(167,139,250,.10), transparent 34%),
+                linear-gradient(145deg, #040c12 0%, #07151d 46%, #061219 100%);
+            background-attachment: fixed;
+        }
+        body, .q-field, .q-btn, .q-checkbox, .q-badge {
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        }
+        h1, h2, h3, .cyber-title, .section-kicker, .shortcut-chip {
+            font-family: "Cascadia Code", "JetBrains Mono", "SFMono-Regular", "Courier New", monospace;
+        }
+        .app-shell { max-width: 1780px; margin: 0 auto; }
+        .hero {
+            position: relative; overflow: hidden; border: 1px solid rgba(94,234,212,.22);
+            border-radius: 26px; padding: 1.35rem 1.5rem;
+            background: linear-gradient(125deg, rgba(8,31,39,.95), rgba(8,24,34,.76));
+            box-shadow: 0 28px 80px rgba(0,0,0,.30), inset 0 1px 0 rgba(255,255,255,.04);
+        }
+        .hero::after {
+            content: ""; position: absolute; inset: -80% -15% auto 45%; height: 260px;
+            background: linear-gradient(100deg, transparent, rgba(94,234,212,.18), rgba(125,211,252,.14), transparent);
+            transform: rotate(-12deg); filter: blur(18px); pointer-events: none;
+        }
+        .cyber-title { letter-spacing: -.045em; text-shadow: 0 0 28px rgba(94,234,212,.13); }
+        .section-kicker { color: var(--aurora); letter-spacing: .12em; text-transform: uppercase; font-size: .72rem; }
+        .q-card {
+            color: var(--ink); background: var(--panel); backdrop-filter: blur(18px);
+            border: 1px solid var(--line); border-radius: 22px;
+            box-shadow: 0 20px 55px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.025);
+        }
+        .glass-card { transition: border-color .2s ease, transform .2s ease, box-shadow .2s ease; }
+        .glass-card:hover { border-color: rgba(94,234,212,.27); box-shadow: 0 22px 65px rgba(0,0,0,.28); }
+        .workspace-grid {
+            display: grid; grid-template-columns: minmax(0, 1fr) 450px;
+            align-items: start; gap: 1.15rem;
+        }
+        .editor-column { min-width: 0; }
+        .toolbar {
+            padding: .7rem .8rem; border: 1px solid var(--line); border-radius: 18px;
+            background: rgba(6,22,30,.78); backdrop-filter: blur(16px);
+            box-shadow: 0 14px 40px rgba(0,0,0,.18);
+        }
+        .ai-sidebar {
+            position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow: hidden;
+            border: 1px solid rgba(94,234,212,.26);
+            box-shadow: 0 25px 80px rgba(0,0,0,.32), 0 0 45px rgba(94,234,212,.055);
+        }
+        .ai-sidebar::before {
+            content: ""; display: block; height: 3px; margin: -16px -16px 12px;
+            background: linear-gradient(90deg, #5eead4, #7dd3fc, #a78bfa);
+        }
+        .suggestion-scroll {
+            max-height: calc(100vh - 640px); min-height: 175px; overflow-y: auto;
+            padding-right: .3rem; scrollbar-color: rgba(94,234,212,.45) transparent;
+        }
+        .suggestion-card { background: rgba(7,24,32,.88); border-radius: 16px; border: 1px solid rgba(125,211,252,.13); }
+        .editor-image {
+            width: min(100%, 980px); border-radius: 18px; overflow: hidden;
+            border: 1px solid rgba(125,211,252,.20); background: #071017;
+            box-shadow: 0 22px 60px rgba(0,0,0,.32);
+        }
+        .preview-image { width: min(100%, 720px); border-radius: 18px; overflow: hidden; border: 1px solid var(--line); }
+        .muted { color: var(--muted); }
+        .aurora-text {
+            background: linear-gradient(90deg, #72f7d6, #85dcff 55%, #b9a4ff);
+            -webkit-background-clip: text; background-clip: text; color: transparent;
+        }
+        .shortcut-chip {
+            border: 1px solid rgba(125,211,252,.18); border-radius: 10px; padding: .22rem .52rem;
+            color: #bdeefa; background: rgba(3,17,24,.70); font-size: .72rem;
+        }
+        .q-btn { border-radius: 12px; text-transform: none; font-weight: 650; letter-spacing: .005em; }
+        .q-field--outlined .q-field__control { border-radius: 14px; background: rgba(3,17,24,.46); }
+        .q-field--outlined .q-field__control:before { border-color: rgba(125,211,252,.20); }
+        .q-field--outlined.q-field--focused .q-field__control:after { border-color: #5eead4; }
+        .q-uploader { border-radius: 16px; overflow: hidden; background: rgba(4,18,25,.62); border: 1px dashed rgba(94,234,212,.30); }
+        .q-uploader__header { background: linear-gradient(110deg, rgba(20,91,91,.72), rgba(31,74,105,.62)); }
+        .confidence-glow { color: #7dd3fc; }
+        @media (max-width: 1180px) {
+            .workspace-grid { grid-template-columns: 1fr; }
+            .ai-sidebar { position: static; max-height: none; }
+            .suggestion-scroll { max-height: 520px; }
+        }
+        @media (max-width: 700px) {
+            .hero { padding: 1.1rem; border-radius: 20px; }
+            .workspace-grid { gap: .8rem; }
+        }
         """
     )
 
-    with ui.column().classes("app-shell w-full gap-4 p-4"):
-        ui.label("Document & Image Redactor").classes("text-3xl font-bold")
-        ui.label(
-            "Upload a PDF or image, select embedded PDF text or draw boxes, preview the result, then download a permanently redacted copy."
-        ).classes("muted")
+    with ui.column().classes("app-shell w-full gap-4 p-4 md:p-6"):
+        with ui.element("section").classes("hero w-full"):
+            with ui.row().classes("w-full items-center justify-between gap-4 flex-wrap"):
+                with ui.column().classes("gap-1"):
+                    ui.label("AURORA // PRIVACY WORKSPACE").classes("section-kicker")
+                    ui.label("Document & Image Redactor").classes("cyber-title aurora-text text-3xl md:text-5xl font-black")
+                    ui.label(
+                        "Human-reviewed AI detection, precise text selection and permanent pixel-level redaction."
+                    ).classes("muted max-w-3xl text-sm md:text-base")
+                with ui.row().classes("items-center gap-2"):
+                    ui.badge("LOCAL REVIEW").props("outline color=positive")
+                    ui.icon("verified_user", size="32px").classes("text-teal-300")
 
-        with ui.card().classes("w-full"):
-            ui.label("1. Upload").classes("text-xl font-semibold")
+        with ui.card().classes("glass-card w-full p-5"):
+            ui.label("01 // INPUT").classes("section-kicker")
+            ui.label("Upload a document").classes("text-xl font-bold")
             upload_status = ui.label("No file uploaded.").classes("muted")
 
             async def handle_upload(event: events.UploadEventArguments) -> None:
@@ -102,6 +229,9 @@ def main_page() -> None:
                 state.words_by_page.clear()
                 state.final_result = None
                 state.ai_suggestions.clear()
+                state.undo_stack.clear()
+                state.redo_stack.clear()
+                update_history_buttons()
 
                 page_select.set_options(list(range(1, page_count + 1)), value=1)
                 if kind == "pdf":
@@ -136,10 +266,10 @@ def main_page() -> None:
                 "w-full"
             )
 
-        editor_controls = ui.row().classes("w-full items-center gap-2 flex-wrap")
+        editor_controls = ui.row().classes("toolbar w-full items-center gap-2 flex-wrap")
         editor_controls.visible = False
 
-        workspace = ui.row().classes("w-full items-start gap-4 flex-wrap")
+        workspace = ui.element("div").classes("workspace-grid w-full")
         workspace.visible = False
 
         with editor_controls:
@@ -152,55 +282,30 @@ def main_page() -> None:
                 value="box",
                 label="Selection mode",
             ).classes("w-64")
-            undo_button = ui.button("Undo", icon="undo")
+            undo_button = ui.button("Undo", icon="undo").props("outline")
+            redo_button = ui.button("Redo", icon="redo").props("outline")
             clear_button = ui.button("Clear page", icon="delete_outline")
-            rectangle_count = ui.label("0 redactions on this page").classes("muted")
+            rectangle_count = ui.label("0 redactions on this page").classes("muted ml-auto")
+            ui.label("Ctrl+Z undo · Ctrl+Shift+Z redo").classes("shortcut-chip")
 
         with workspace:
-            with ui.card().classes("grow min-w-[680px]"):
-                ui.label("2. Mark redactions").classes("text-xl font-semibold")
-                mode_help = ui.label(
-                    "Draw boxes: click and drag over any area you want to remove."
-                ).classes("muted")
-                editor_image = ui.interactive_image(
-                    source="",
-                    size=(CANVAS_WIDTH, CANVAS_HEIGHT),
-                    events=["mousedown", "mousemove", "mouseup", "mouseleave"],
-                    cross=True,
-                ).classes("editor-image")
+            with ui.column().classes("editor-column w-full gap-4"):
+                with ui.card().classes("glass-card w-full p-5"):
+                    ui.label("02 // EDITOR").classes("section-kicker")
+                    ui.label("Mark redactions").classes("text-xl font-bold")
+                    mode_help = ui.label(
+                        "Draw boxes: click and drag over any area you want to remove."
+                    ).classes("muted")
+                    editor_image = ui.interactive_image(
+                        source="",
+                        size=(CANVAS_WIDTH, CANVAS_HEIGHT),
+                        events=["mousedown", "mousemove", "mouseup", "mouseleave"],
+                        cross=True,
+                    ).classes("editor-image")
 
-            with ui.column().classes("w-[560px] max-w-full gap-4"):
-                with ui.card().classes("w-full"):
-                    ui.label("3. AI suggestions").classes("text-xl font-semibold")
-                    ui.label(
-                        "The scan proposes likely sensitive regions with confidence scores. Nothing is redacted until you select suggestions and apply them."
-                    ).classes("muted text-sm")
-                    ui.label(
-                        "The rendered page image and extracted text are sent to a Fireworks vision model. Pattern, OCR and QR checks also run locally."
-                    ).classes("muted text-xs")
-
-                    with ui.row().classes("w-full items-center gap-3 flex-wrap"):
-                        analysis_scope = ui.select(
-                            options={"all": "All pages", "current": "Current page"},
-                            value="all",
-                            label="Scan scope",
-                        ).classes("w-40")
-                        run_ocr_checkbox = ui.checkbox("OCR scans and images", value=True)
-
-                    threshold_label = ui.label("Show suggestions at 60% confidence or higher").classes("muted text-sm")
-                    confidence_threshold = ui.slider(min=0.5, max=0.99, step=0.01, value=0.60).classes("w-full")
-                    analyze_button = ui.button("Scan for sensitive information", icon="auto_awesome").props("color=primary")
-                    analysis_status = ui.label("Upload a file, then run the scan.").classes("muted")
-
-                    with ui.row().classes("w-full gap-2 flex-wrap"):
-                        select_all_button = ui.button("Select all", icon="done_all").props("outline")
-                        clear_selection_button = ui.button("Clear selection", icon="remove_done").props("outline")
-                        apply_suggestions_button = ui.button("Apply selected", icon="playlist_add_check").props("color=warning")
-
-                    suggestions_container = ui.column().classes("w-full gap-2 max-h-[540px] overflow-auto")
-
-                with ui.card().classes("w-full"):
-                    ui.label("4. Final preview").classes("text-xl font-semibold")
+                with ui.card().classes("glass-card w-full p-5"):
+                    ui.label("04 // EXPORT").classes("section-kicker")
+                    ui.label("Final preview").classes("text-xl font-bold")
                     scrub_checkbox = ui.checkbox(
                         "Remove metadata, hidden text, attachments and JavaScript",
                         value=True,
@@ -217,6 +322,92 @@ def main_page() -> None:
                     preview_image.visible = False
                     download_button = ui.button("Download redacted file", icon="download").props("color=positive")
                     download_button.disable()
+
+            with ui.card().classes("ai-sidebar w-full p-4"):
+                with ui.row().classes("w-full items-center justify-between gap-2"):
+                    with ui.column().classes("gap-0"):
+                        ui.label("03 // AI REVIEW").classes("section-kicker")
+                        ui.label("AI redaction sidebar").classes("text-xl font-bold")
+                        ui.label("Review likely sensitive content while marking the page.").classes("muted text-sm")
+                    ui.icon("shield", size="md").classes("text-teal-300")
+
+                ui.label(
+                    "Suggestions are only overlays until you tick them and press Apply selected. Names and addresses are now checked by both contextual rules and the vision model."
+                ).classes("muted text-xs")
+
+                with ui.row().classes("w-full items-center gap-3 flex-wrap"):
+                    analysis_scope = ui.select(
+                        options={"all": "All pages", "current": "Current page"},
+                        value="all",
+                        label="Scan scope",
+                    ).props("outlined dense").classes("w-40")
+                    run_ocr_checkbox = ui.checkbox("Use OCR", value=True)
+                ui.label(
+                    "OCR reads text from scanned PDFs and images so sensitive information can be detected and suggested for redaction."
+                ).classes("muted text-xs -mt-2")
+
+                custom_instruction = ui.textarea(
+                    label="Custom redaction instruction",
+                    placeholder="e.g. Redact every link and any picture containing a person.",
+                ).props("outlined autogrow clearable maxlength=700").classes("w-full")
+                ui.label(
+                    "Describe extra text or visual targets. Standard privacy checks still run alongside your instruction."
+                ).classes("muted text-xs -mt-2")
+                with ui.row().classes("w-full gap-2 flex-wrap"):
+                    ui.button("All links", on_click=lambda: custom_instruction.set_value("Redact every visible web link or URL."), icon="link").props("flat dense")
+                    ui.button("Faces / photos", on_click=lambda: custom_instruction.set_value("Redact all faces, portraits and pictures containing people."), icon="face").props("flat dense")
+                    ui.button("Signatures", on_click=lambda: custom_instruction.set_value("Redact every handwritten or digital signature."), icon="draw").props("flat dense")
+
+                learn_from_review = ui.checkbox("Use my approvals to calibrate future confidence", value=False)
+                ui.label(
+                    "Stores category-level accept/reject metadata only — never document text, images, coordinates or secret values."
+                ).classes("muted text-xs -mt-2")
+
+                threshold_label = ui.label("Show suggestions at 60% confidence or higher").classes("muted text-sm")
+                confidence_threshold = ui.slider(min=0.5, max=0.99, step=0.01, value=0.60).classes("w-full")
+                analyze_button = ui.button("Run AI privacy scan", icon="auto_awesome").props("color=primary unelevated").classes("w-full")
+                analysis_status = ui.label("Upload a file, then run the scan.").classes("muted text-sm")
+
+                with ui.row().classes("w-full gap-2 flex-wrap"):
+                    select_all_button = ui.button("Select all", icon="done_all").props("outline dense")
+                    clear_selection_button = ui.button("Clear", icon="remove_done").props("outline dense")
+                    apply_suggestions_button = ui.button("Apply selected", icon="playlist_add_check").props("color=primary unelevated")
+
+                ui.separator()
+                suggestions_container = ui.column().classes("suggestion-scroll w-full gap-2")
+
+        def capture_snapshot(label: str = "Edit") -> HistorySnapshot:
+            return HistorySnapshot(
+                redactions=copy.deepcopy(state.redactions),
+                suggestion_states={
+                    suggestion.suggestion_id: (suggestion.selected, suggestion.applied)
+                    for suggestion in state.ai_suggestions
+                },
+                current_page=state.current_page,
+                label=label,
+            )
+
+        def restore_snapshot(snapshot: HistorySnapshot) -> None:
+            state.redactions = copy.deepcopy(snapshot.redactions)
+            for suggestion in state.ai_suggestions:
+                selected, applied = snapshot.suggestion_states.get(
+                    suggestion.suggestion_id, (suggestion.selected, suggestion.applied)
+                )
+                suggestion.selected = selected
+                suggestion.applied = applied
+            state.current_page = min(max(snapshot.current_page, 0), max(state.page_count - 1, 0))
+            invalidate_final_preview()
+
+        def remember_change(before: HistorySnapshot) -> None:
+            state.undo_stack.append(before)
+            if len(state.undo_stack) > 100:
+                state.undo_stack.pop(0)
+            state.redo_stack.clear()
+            update_history_buttons()
+
+        def update_history_buttons() -> None:
+            undo_button.set_enabled(bool(state.undo_stack))
+            redo_button.set_enabled(bool(state.redo_stack))
 
         def current_rectangles() -> list[tuple[float, float, float, float]]:
             return state.redactions.setdefault(state.current_page, [])
@@ -262,7 +453,7 @@ def main_page() -> None:
                 right, bottom = state.page_view.page_to_canvas(max(x0, x1), max(y0, y1))
                 shapes.append(
                     f'<rect x="{left:.2f}" y="{top:.2f}" width="{right-left:.2f}" height="{bottom-top:.2f}" '
-                    'fill="black" fill-opacity="0.64" stroke="#ef4444" stroke-width="2" />'
+                    'fill="#02080d" fill-opacity="0.82" stroke="#5eead4" stroke-width="2" />'
                 )
 
             threshold = float(confidence_threshold.value or 0.60)
@@ -270,14 +461,14 @@ def main_page() -> None:
                 if suggestion.page_index != state.current_page or suggestion.applied or suggestion.confidence < threshold:
                     continue
                 selected = suggestion.selected
-                stroke = "#f59e0b" if selected else "#94a3b8"
+                stroke = "#5eead4" if selected else "#6b8792"
                 opacity = "0.20" if selected else "0.06"
                 for x0, y0, x1, y1 in suggestion.rects:
                     left, top = state.page_view.page_to_canvas(min(x0, x1), min(y0, y1))
                     right, bottom = state.page_view.page_to_canvas(max(x0, x1), max(y0, y1))
                     shapes.append(
                         f'<rect x="{left:.2f}" y="{top:.2f}" width="{right-left:.2f}" height="{bottom-top:.2f}" '
-                        f'fill="#f59e0b" fill-opacity="{opacity}" stroke="{stroke}" stroke-width="2" stroke-dasharray="6 4" />'
+                        f'fill="#5eead4" fill-opacity="{opacity}" stroke="{stroke}" stroke-width="2" stroke-dasharray="6 4" />'
                     )
 
             if state.draft_rect is not None:
@@ -285,14 +476,14 @@ def main_page() -> None:
                 left, top = state.page_view.page_to_canvas(min(x0, x1), min(y0, y1))
                 right, bottom = state.page_view.page_to_canvas(max(x0, x1), max(y0, y1))
                 if selection_mode.value == "text":
-                    fill = "#2563eb"
+                    fill = "#7dd3fc"
                     opacity = "0.18"
                 else:
                     fill = "black"
                     opacity = "0.38"
                 shapes.append(
                     f'<rect x="{left:.2f}" y="{top:.2f}" width="{right-left:.2f}" height="{bottom-top:.2f}" '
-                    f'fill="{fill}" fill-opacity="{opacity}" stroke="#2563eb" stroke-width="2" stroke-dasharray="8 5" />'
+                    f'fill="{fill}" fill-opacity="{opacity}" stroke="#a78bfa" stroke-width="2" stroke-dasharray="8 5" />'
                 )
 
             return "".join(shapes)
@@ -325,7 +516,7 @@ def main_page() -> None:
                     return
 
                 for suggestion in suggestions:
-                    with ui.card().classes("w-full p-3"):
+                    with ui.card().classes("suggestion-card w-full p-3"):
                         with ui.row().classes("w-full items-start gap-2"):
                             checkbox = ui.checkbox(value=suggestion.selected and not suggestion.applied)
                             checkbox.set_enabled(not suggestion.applied)
@@ -339,7 +530,7 @@ def main_page() -> None:
                                 with ui.row().classes("items-center gap-2 flex-wrap"):
                                     ui.badge(suggestion.category_label)
                                     ui.label(f"{suggestion.confidence * 100:.0f}% • Page {suggestion.page_index + 1}").classes(
-                                        "font-semibold"
+                                        "font-semibold confidence-glow"
                                     )
                                     if suggestion.applied:
                                         ui.badge("Applied").props("color=positive")
@@ -504,6 +695,7 @@ def main_page() -> None:
 
             if event.type == "mouseup":
                 changed = False
+                before = capture_snapshot("Manual redaction")
                 if selection_mode.value == "text" and state.kind == "pdf":
                     changed = select_embedded_text(start_x, start_y, current_x, current_y) > 0
                     if not changed and not current_words():
@@ -519,6 +711,7 @@ def main_page() -> None:
                         changed = True
 
                 if changed:
+                    remember_change(before)
                     invalidate_final_preview()
                 state.drawing = False
                 state.start_point = None
@@ -543,20 +736,60 @@ def main_page() -> None:
         previous_button.on_click(lambda: show_page(state.current_page - 1))
         next_button.on_click(lambda: show_page(state.current_page + 1))
 
-        def undo_redaction() -> None:
-            if current_rectangles():
-                current_rectangles().pop()
-                invalidate_final_preview()
-                refresh_overlay()
+        async def undo_redaction() -> None:
+            if not state.undo_stack:
+                ui.notify("Nothing to undo.", type="info")
+                return
+            current = capture_snapshot("Redo")
+            snapshot = state.undo_stack.pop()
+            state.redo_stack.append(current)
+            restore_snapshot(snapshot)
+            await show_page(snapshot.current_page)
+            render_suggestions()
+            refresh_overlay()
+            update_history_buttons()
+            ui.notify(f"Undid: {snapshot.label}", type="info")
+
+        async def redo_redaction() -> None:
+            if not state.redo_stack:
+                ui.notify("Nothing to redo.", type="info")
+                return
+            current = capture_snapshot("Undo")
+            snapshot = state.redo_stack.pop()
+            state.undo_stack.append(current)
+            restore_snapshot(snapshot)
+            await show_page(snapshot.current_page)
+            render_suggestions()
+            refresh_overlay()
+            update_history_buttons()
+            ui.notify("Redid the last edit.", type="info")
 
         def clear_page_redactions() -> None:
             if current_rectangles():
+                before = capture_snapshot("Clear page")
                 current_rectangles().clear()
+                remember_change(before)
                 invalidate_final_preview()
                 refresh_overlay()
 
+        async def keyboard_shortcuts(event: events.KeyEventArguments) -> None:
+            if not event.action.keydown or event.action.repeat:
+                return
+            command = event.modifiers.ctrl or event.modifiers.meta
+            key_name = event.key.name.lower()
+            if command and key_name == "z":
+                if event.modifiers.shift:
+                    await redo_redaction()
+                else:
+                    await undo_redaction()
+            elif command and key_name == "y":
+                await redo_redaction()
+
+        ui.keyboard(on_key=keyboard_shortcuts, repeating=False)
         undo_button.on_click(undo_redaction)
+        redo_button.on_click(redo_redaction)
         clear_button.on_click(clear_page_redactions)
+        update_history_buttons()
 
         async def scan_for_sensitive_information() -> None:
             if state.file_bytes is None or state.kind is None:
@@ -601,6 +834,7 @@ def main_page() -> None:
                         embedded_words=words,
                         use_ai=True,
                         run_ocr=bool(run_ocr_checkbox.value),
+                        custom_instruction=str(custom_instruction.value or "").strip(),
                     )
                     state.ai_suggestions.extend(result.suggestions)
                     warnings.extend(result.warnings)
@@ -650,6 +884,8 @@ def main_page() -> None:
                 ui.notify("Select at least one unapplied suggestion.", type="warning")
                 return
 
+            before = capture_snapshot("Apply AI suggestions")
+            reviewed = [suggestion for suggestion in visible_suggestions() if not suggestion.applied]
             added_rectangles = 0
             for suggestion in chosen:
                 page_rectangles = state.redactions.setdefault(suggestion.page_index, [])
@@ -660,6 +896,24 @@ def main_page() -> None:
                 suggestion.applied = True
                 suggestion.selected = False
 
+            remember_change(before)
+            if bool(learn_from_review.value):
+                try:
+                    record_review_metadata(
+                        filename=state.filename,
+                        custom_prompt_used=bool((custom_instruction.value or "").strip()),
+                        rows=[
+                            {
+                                "category": suggestion.category,
+                                "accepted": suggestion in chosen,
+                                "confidence": suggestion.confidence,
+                                "source": suggestion.source,
+                            }
+                            for suggestion in reviewed
+                        ],
+                    )
+                except Exception as exc:
+                    ui.notify(f"Could not save local review calibration: {exc}", type="warning")
             invalidate_final_preview()
             render_suggestions()
             refresh_overlay()
@@ -736,7 +990,8 @@ def main_page() -> None:
 
         download_button.on_click(download_output)
 
-        with ui.card().classes("w-full"):
+        with ui.card().classes("glass-card w-full p-5"):
+            ui.label("SECURITY NOTES").classes("section-kicker")
             ui.label("How manual and AI-assisted redaction work").classes("font-semibold")
             ui.label(
                 "Select embedded PDF text snaps to real word coordinates and permanently removes those PDF objects. "
