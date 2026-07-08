@@ -1,0 +1,9 @@
+nicegui==3.14.0
+pymupdf==1.28.0
+pillow==11.3.0
+openai==2.44.0
+python-dotenv==1.2.2
+pydantic==2.13.4
+rapidocr==3.9.1
+onnxruntime==1.27.0
+opencv-python-headless==4.13.0.92
