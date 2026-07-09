@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import asyncio
 import copy
 import os
-import time
 
 from nicegui import events, run, ui
 
@@ -151,7 +149,7 @@ def main_page() -> None:
         .glass-card { transition: border-color .2s ease, transform .2s ease, box-shadow .2s ease; }
         .glass-card:hover { border-color: rgba(94,234,212,.27); box-shadow: 0 22px 65px rgba(0,0,0,.28); }
         .workspace-grid {
-            display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, 430px);
+            display: grid; grid-template-columns: minmax(0, 1fr) 450px;
             align-items: start; gap: 1.15rem;
         }
         .editor-column { min-width: 0; }
@@ -176,17 +174,7 @@ def main_page() -> None:
             background: linear-gradient(90deg, #5eead4, #7dd3fc, #a78bfa);
         }
         .suggestion-scroll {
-            max-height: 430px; min-height: 190px;
-            overflow-y: auto; overflow-x: hidden; padding-right: .30rem;
-            scrollbar-color: rgba(94,234,212,.48) rgba(3,17,24,.24);
-            scrollbar-width: thin;
-        }
-        .suggestion-scroll::-webkit-scrollbar { width: 8px; }
-        .suggestion-scroll::-webkit-scrollbar-track {
-            background: rgba(3,17,24,.24); border-radius: 10px;
-        }
-        .suggestion-scroll::-webkit-scrollbar-thumb {
-            background: linear-gradient(#5eead4, #7dd3fc); border-radius: 10px;
+            min-height: 190px; overflow: visible; padding-right: .15rem;
         }
         .sidebar-section {
             border: 1px solid rgba(125,211,252,.14); border-radius: 18px;
@@ -206,21 +194,7 @@ def main_page() -> None:
             padding: .65rem; background: rgba(3,17,24,.48);
         }
         .scan-status { white-space: normal; overflow-wrap: anywhere; line-height: 1.45; }
-        .suggestion-card {
-            background: rgba(7,24,32,.88); border-radius: 16px;
-            border: 1px solid rgba(125,211,252,.13); cursor: pointer;
-            user-select: none; transition: border-color .18s ease, background .18s ease, transform .18s ease, box-shadow .18s ease;
-        }
-        .suggestion-card:hover {
-            border-color: rgba(94,234,212,.42); background: rgba(9,34,43,.94);
-            transform: translateY(-1px); box-shadow: 0 12px 30px rgba(0,0,0,.18);
-        }
-        .suggestion-card-selected {
-            border-color: rgba(94,234,212,.72) !important;
-            background: linear-gradient(135deg, rgba(15,66,68,.62), rgba(10,39,52,.94)) !important;
-            box-shadow: 0 0 0 1px rgba(94,234,212,.14), 0 14px 34px rgba(0,0,0,.24);
-        }
-        .suggestion-card-applied { cursor: default; opacity: .72; }
+        .suggestion-card { background: rgba(7,24,32,.88); border-radius: 16px; border: 1px solid rgba(125,211,252,.13); }
         .editor-image {
             width: min(100%, 980px); border-radius: 18px; overflow: hidden;
             border: 1px solid rgba(125,211,252,.20); background: #071017;
@@ -257,7 +231,7 @@ def main_page() -> None:
             padding: .16rem .55rem; background: rgba(20,65,78,.42); color: #9df8e4;
             font-family: "Cascadia Code", "Courier New", monospace; font-size: .68rem; letter-spacing: .08em;
         }
-        @media (max-width: 760px) {
+        @media (max-width: 1180px) {
             .workspace-grid { grid-template-columns: 1fr; }
             .ai-sidebar { position: static; height: auto; min-height: 0; max-height: none; overflow: visible; }
             .suggestion-scroll { min-height: 0; }
@@ -273,8 +247,8 @@ def main_page() -> None:
         with ui.element("section").classes("hero w-full"):
             with ui.row().classes("w-full items-center justify-between gap-4 flex-wrap"):
                 with ui.column().classes("gap-1"):
-                    ui.label("AURORA // PRIVACY WORKSPACE").classes("section-kicker")
-                    ui.label("Document & Image Redactor").classes("cyber-title aurora-text text-3xl md:text-5xl font-black")
+                    ui.label("REDACTIFY // PRIVACY WORKSPACE").classes("section-kicker")
+                    ui.label("Document & Image Redactor").classes("cyber-title redactify-text text-3xl md:text-5xl font-black")
                     ui.label(
                         "Human-reviewed AI detection, precise text selection and permanent pixel-level redaction."
                     ).classes("muted max-w-3xl text-sm md:text-base")
@@ -514,9 +488,7 @@ def main_page() -> None:
                 "w-full"
             )
             uploader.enable()
-            ui.label(
-                "Manual redaction works locally without Fireworks. Connect an API key only to unlock AI suggestions."
-            ).classes("muted text-xs")
+            ui.label("Manual redaction works locally without Fireworks. Connect an API key only to unlock AI suggestions.").classes("muted text-xs")
 
         editor_controls = ui.row().classes("toolbar w-full items-center gap-2 flex-wrap")
         editor_controls.visible = False
@@ -580,7 +552,7 @@ def main_page() -> None:
                     with ui.column().classes("gap-0"):
                         ui.label("04 // AI REVIEW").classes("section-kicker")
                         ui.label("AI redaction sidebar").classes("text-xl font-bold")
-                        ui.label("Connect Fireworks to scan, then click suggestions to select or deselect them.").classes("muted text-sm")
+                        ui.label("Configure the scan, then review every proposed redaction.").classes("muted text-sm")
                     ui.icon("shield", size="md").classes("text-teal-300")
 
                 with ui.column().classes("sidebar-section w-full gap-2"):
@@ -601,7 +573,7 @@ def main_page() -> None:
                         placeholder="e.g. Redact every link and any picture containing a person.",
                     ).props("outlined autogrow clearable maxlength=700").classes("w-full")
                     ui.label(
-                        "Leave blank for a full privacy scan. Use wording such as “Only redact phone numbers” to restrict results to that target."
+                        "Describe extra text or visual targets. Standard privacy checks still run alongside your instruction."
                     ).classes("muted text-xs -mt-1")
                     with ui.row().classes("w-full gap-2 flex-wrap"):
                         all_links_button = ui.button(
@@ -647,7 +619,7 @@ def main_page() -> None:
                             ui.label("Review and apply").classes("font-semibold")
                         ui.badge("HUMAN APPROVAL REQUIRED").props("outline color=positive")
                     ui.label(
-                        "Click anywhere on a suggestion card to select or deselect it. Suggestions remain temporary until applied."
+                        "Suggestions remain temporary overlays until selected and applied."
                     ).classes("muted text-xs")
                     with ui.row().classes("w-full gap-2 flex-wrap"):
                         select_all_button = ui.button("Select all", icon="done_all").props("outline dense")
@@ -796,30 +768,13 @@ def main_page() -> None:
                     return
 
                 for suggestion in suggestions:
-                    card_classes = "suggestion-card w-full p-3"
-                    if suggestion.selected and not suggestion.applied:
-                        card_classes += " suggestion-card-selected"
-                    if suggestion.applied:
-                        card_classes += " suggestion-card-applied"
-
-                    def toggle_suggestion(item=suggestion) -> None:
-                        if item.applied or state.scan_in_progress:
-                            return
-                        item.selected = not item.selected
-                        render_suggestions()
-                        refresh_overlay()
-
-                    with ui.card().classes(card_classes).on("click", toggle_suggestion):
+                    with ui.card().classes("suggestion-card w-full p-3"):
                         with ui.row().classes("w-full items-start gap-2"):
                             checkbox = ui.checkbox(value=suggestion.selected and not suggestion.applied)
-                            checkbox.set_enabled(not suggestion.applied and not state.scan_in_progress)
-                            checkbox.on("click", js_handler="event.stopPropagation()")
+                            checkbox.set_enabled(not suggestion.applied)
 
                             def update_selection(event: events.ValueChangeEventArguments, item=suggestion) -> None:
-                                if item.applied or state.scan_in_progress:
-                                    return
                                 item.selected = bool(event.value)
-                                render_suggestions()
                                 refresh_overlay()
 
                             checkbox.on_value_change(update_selection)
@@ -836,12 +791,11 @@ def main_page() -> None:
                                     "muted text-xs"
                                 )
                                 if suggestion.page_index != state.current_page:
-                                    show_page_button = ui.button(
+                                    ui.button(
                                         "Show page",
                                         icon="find_in_page",
                                         on_click=lambda page=suggestion.page_index: show_page(page),
                                     ).props("flat dense").classes("self-start")
-                                    show_page_button.on("click", js_handler="event.stopPropagation()")
 
         def threshold_changed(event: events.ValueChangeEventArguments) -> None:
             value = float(event.value or 0.50)
@@ -1132,58 +1086,43 @@ def main_page() -> None:
             if state.scan_in_progress:
                 return
             if not state.fireworks_connected or not state.connected_api_key or not state.connected_model:
-                ui.notify(
-                    "Connect and validate a Fireworks API key before running a scan.",
-                    type="warning",
-                )
+                ui.notify("Connect and validate a Fireworks API key before running a scan.", type="warning")
                 return
             if state.file_bytes is None or state.kind is None:
                 ui.notify("Upload a PDF or image first.", type="warning")
                 return
 
             entered_api_key = str(fireworks_api_key.value or "").strip()
-            selected_model = str(
-                vision_model_select.value or DEFAULT_UI_FIREWORKS_MODEL
-            ).strip()
+            selected_model = str(vision_model_select.value or DEFAULT_UI_FIREWORKS_MODEL).strip()
             if (
                 entered_api_key != state.connected_api_key
                 or selected_model != state.connected_model
             ):
                 invalidate_fireworks_connection()
-                ui.notify(
-                    "The API key or model changed. Press Connect again before scanning.",
-                    type="warning",
-                )
+                ui.notify("The API key or model changed. Press Connect again before scanning.", type="warning")
                 return
 
-            previous_suggestions = list(state.ai_suggestions)
             if analysis_scope.value == "current":
                 page_indexes = [state.current_page]
-                state.ai_suggestions = [
+                retained_suggestions = [
                     suggestion
                     for suggestion in state.ai_suggestions
                     if suggestion.page_index != state.current_page
                 ]
             else:
                 page_indexes = list(range(state.page_count))
-                state.ai_suggestions = []
+                retained_suggestions = []
 
-            # This immediate render is part of the original working flow. It removes
-            # stale cards before new pages are appended and rendered one by one.
-            render_suggestions()
-            refresh_overlay()
-
+            previous_suggestions = state.ai_suggestions
+            scanned_suggestions: list[SensitiveSuggestion] = []
             warnings: list[str] = []
             total_tokens = 0
-            total_new_suggestions = 0
             total_pages = max(len(page_indexes), 1)
 
             set_scan_controls_locked(True)
             scan_progress_shell.visible = True
             set_scan_progress(0.0, "Preparing the scan…")
-            analysis_status.set_text(
-                "AI scan in progress. Connection and model settings are locked."
-            )
+            analysis_status.set_text("AI scan in progress. Connection and model settings are locked.")
 
             try:
                 for position, page_index in enumerate(page_indexes, start=1):
@@ -1195,24 +1134,18 @@ def main_page() -> None:
                     )
 
                     if state.kind == "pdf":
-                        image, view = await run.io_bound(
-                            render_page, state.file_bytes, page_index
-                        )
+                        image, view = await run.io_bound(render_page, state.file_bytes, page_index)
                         words = state.words_by_page.get(page_index)
                         if words is None:
-                            words = await run.io_bound(
-                                extract_page_words, state.file_bytes, page_index
-                            )
+                            words = await run.io_bound(extract_page_words, state.file_bytes, page_index)
                             state.words_by_page[page_index] = words
                     else:
-                        image, view = await run.io_bound(
-                            render_image, state.file_bytes
-                        )
+                        image, view = await run.io_bound(render_image, state.file_bytes)
                         words = []
 
                     set_scan_progress(
                         page_start + page_span * 0.25,
-                        f"Running OCR and Fireworks vision on page {page_index + 1}…",
+                        f"Extracting text and running Fireworks vision on page {page_index + 1}…",
                     )
                     result = await run.io_bound(
                         analyze_page,
@@ -1222,9 +1155,7 @@ def main_page() -> None:
                         embedded_words=words,
                         use_ai=True,
                         run_ocr=bool(run_ocr_checkbox.value),
-                        custom_instruction=str(
-                            custom_instruction.value or ""
-                        ).strip(),
+                        custom_instruction=str(custom_instruction.value or "").strip(),
                         fireworks_api_key=state.connected_api_key,
                         fireworks_model=state.connected_model,
                         use_local_calibration=bool(learn_from_review.value),
@@ -1233,65 +1164,36 @@ def main_page() -> None:
                         raise RuntimeError(
                             "Fireworks vision did not complete, so no local-only scan was accepted."
                         )
-
-                    # Exact behaviour from the working version: append to the live state
-                    # and rebuild the visible list immediately after each analysed page.
-                    state.ai_suggestions.extend(result.suggestions)
-                    total_new_suggestions += len(result.suggestions)
+                    scanned_suggestions.extend(result.suggestions)
                     warnings.extend(result.warnings)
                     total_tokens += result.token_count
-                    render_suggestions()
-                    refresh_overlay()
-
                     set_scan_progress(
                         position / total_pages,
                         f"Completed page {page_index + 1} ({position}/{total_pages}).",
                     )
 
+                state.ai_suggestions = retained_suggestions + scanned_suggestions
+                render_suggestions()
+                refresh_overlay()
                 visible_count = len(visible_suggestions())
-                model_label = FIREWORKS_MODEL_CATALOG[
-                    state.connected_model
-                ]["label"].split(" — ", 1)[0]
-                instruction_text = str(
-                    custom_instruction.value or ""
-                ).strip()
-                scope_note = (
-                    f" Instruction: {instruction_text}"
-                    if instruction_text
-                    else ""
+                model_label = FIREWORKS_MODEL_CATALOG[state.connected_model]["label"].split(" — ", 1)[0]
+                status = (
+                    f"Found {len(scanned_suggestions)} new suggestion(s); {visible_count} meet the current threshold. "
+                    f"Analysed {total_tokens} text token(s) using {model_label}."
                 )
-                analysis_status.set_text(
-                    f"Found {total_new_suggestions} new suggestion(s); "
-                    f"{visible_count} meet the current threshold. "
-                    f"Analysed {total_tokens} text token(s) using "
-                    f"{model_label}.{scope_note}"
-                )
-                set_scan_progress(
-                    1.0, "Scan complete — review the suggestions below."
-                )
+                analysis_status.set_text(status)
+                set_scan_progress(1.0, "Scan complete — review the suggestions below.")
                 if warnings:
                     ui.notify(warnings[0], type="warning", timeout=10000)
                 else:
-                    ui.notify(
-                        "Sensitive-information scan complete.",
-                        type="positive",
-                    )
+                    ui.notify("Sensitive-information scan complete.", type="positive")
             except Exception as exc:
                 state.ai_suggestions = previous_suggestions
                 render_suggestions()
                 refresh_overlay()
-                analysis_status.set_text(
-                    "The scan failed. Previous suggestions were restored."
-                )
-                set_scan_progress(
-                    0.0,
-                    "Scan failed — check the connection message and try again.",
-                )
-                ui.notify(
-                    f"AI scan failed: {exc}",
-                    type="negative",
-                    timeout=12000,
-                )
+                analysis_status.set_text("The scan failed. No partial scan results were applied.")
+                set_scan_progress(0.0, "Scan failed — check the connection message and try again.")
+                ui.notify(f"AI scan failed: {exc}", type="negative", timeout=12000)
             finally:
                 set_scan_controls_locked(False)
 
@@ -1436,7 +1338,7 @@ def main_page() -> None:
 
 if __name__ in {"__main__", "__mp_main__"}:
     ui.run(
-        title="Document & Image Redactor",
+        title="Redactify",
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "8081")),
         reload=False,

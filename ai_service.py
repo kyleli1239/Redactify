@@ -1554,7 +1554,7 @@ SYNTHETIC_EXAMPLES_JSON={compact_examples()}
         base_reason = model_finding.reason.strip() or "The vision model identified this region as potentially sensitive."
         added_occurrences = max(0, len(unique_tokens) - original_token_count)
         if added_occurrences:
-            base_reason += f" Aurora also matched {added_occurrences} repeated text token(s) on this page."
+            base_reason += f" Redactify also matched {added_occurrences} repeated text token(s) on this page."
 
         findings.append(
             _make_suggestion(

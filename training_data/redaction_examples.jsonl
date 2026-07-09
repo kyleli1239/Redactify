@@ -1,0 +1,26 @@
+{"messages": [{"role": "user", "content": "Email: alex.taylor@example.com"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"email_address\",\"target\":\"alex.taylor@example.com\"}]}"}]}
+{"messages": [{"role": "user", "content": "Call me on +44 7700 900123"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"phone_number\",\"target\":\"+44 7700 900123\"}]}"}]}
+{"messages": [{"role": "user", "content": "Address: Flat 4, 18 King Street, Coventry CV1 2AB"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"home_address\",\"target\":\"Flat 4, 18 King Street, Coventry CV1 2AB\"}]}"}]}
+{"messages": [{"role": "user", "content": "Applicant: Jordan Lee"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"full_name\",\"target\":\"Jordan Lee\"}]}"}]}
+{"messages": [{"role": "user", "content": "@bluefox_17"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"username\",\"target\":\"@bluefox_17\"}]}"}]}
+{"messages": [{"role": "user", "content": "Account number 12345678"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"account_number\",\"target\":\"12345678\"}]}"}]}
+{"messages": [{"role": "user", "content": "Card 4111 1111 1111 1111"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"bank_card_number\",\"target\":\"4111 1111 1111 1111\"}]}"}]}
+{"messages": [{"role": "user", "content": "FIREWORKS_API_KEY=fw_example_secret"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"api_key\",\"target\":\"fw_example_secret\"}]}"}]}
+{"messages": [{"role": "user", "content": "Authorization: Bearer eyJhbGciOi..."}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"access_token\",\"target\":\"eyJhbGciOi...\"}]}"}]}
+{"messages": [{"role": "user", "content": "Password: Winter!2026"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"password\",\"target\":\"Winter!2026\"}]}"}]}
+{"messages": [{"role": "user", "content": "postgresql://admin:secret@db.internal/app"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"database_connection_string\",\"target\":\"postgresql://admin:secret@db.internal/app\"}]}"}]}
+{"messages": [{"role": "user", "content": "-----BEGIN PRIVATE KEY-----"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"private_key\",\"target\":\"complete key block\"}]}"}]}
+{"messages": [{"role": "user", "content": "Server IP 10.0.0.42"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"ip_address\",\"target\":\"10.0.0.42\"}]}"}]}
+{"messages": [{"role": "user", "content": "C:\\Users\\Jordan\\Documents\\private.txt"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"file_path\",\"target\":\"C:\\\\Users\\\\Jordan\\\\Documents\\\\private.txt\"}]}"}]}
+{"messages": [{"role": "user", "content": "https://example.com/reset?token=secret"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"sensitive_url\",\"target\":\"complete URL\"}]}"}]}
+{"messages": [{"role": "user", "content": "Student ID: 2310456"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"student_id\",\"target\":\"2310456\"}]}"}]}
+{"messages": [{"role": "user", "content": "Employee ID E-10482"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"employee_id\",\"target\":\"E-10482\"}]}"}]}
+{"messages": [{"role": "user", "content": "DOB: 29/06/2007"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"date_of_birth\",\"target\":\"29/06/2007\"}]}"}]}
+{"messages": [{"role": "user", "content": "Your verification code is 381204"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"authentication_code\",\"target\":\"381204\"}]}"}]}
+{"messages": [{"role": "user", "content": "A screenshot containing private message bubbles"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"private_chat\",\"target\":\"message bubble or panel bbox\"}]}"}]}
+{"messages": [{"role": "user", "content": "A visible login QR"}, {"role": "assistant", "content": "{\"findings\":[{\"category\":\"qr_code\",\"target\":\"QR bbox\"}]}"}]}
+{"messages": [{"role": "user", "content": "Invoice date: 08/07/2026"}, {"role": "assistant", "content": "{\"findings\":[],\"note\":\"Do not classify as date_of_birth without birth context.\"}"}]}
+{"messages": [{"role": "user", "content": "OpenAI Ltd"}, {"role": "assistant", "content": "{\"findings\":[],\"note\":\"Do not classify an organisation as a full_name.\"}"}]}
+{"messages": [{"role": "user", "content": "https://example.com/about"}, {"role": "assistant", "content": "{\"findings\":[],\"note\":\"Do not classify as sensitive_url unless the user requests all links.\"}"}]}
+{"messages": [{"role": "user", "content": "Version 1.2.3.4"}, {"role": "assistant", "content": "{\"findings\":[],\"note\":\"Do not classify version text as an IP address without context.\"}"}]}
+{"messages": [{"role": "user", "content": "Card ending 1234"}, {"role": "assistant", "content": "{\"findings\":[],\"note\":\"Do not classify a four-digit suffix as a complete bank card number.\"}"}]}
