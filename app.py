@@ -194,7 +194,21 @@ def main_page() -> None:
             padding: .65rem; background: rgba(3,17,24,.48);
         }
         .scan-status { white-space: normal; overflow-wrap: anywhere; line-height: 1.45; }
-        .suggestion-card { background: rgba(7,24,32,.88); border-radius: 16px; border: 1px solid rgba(125,211,252,.13); }
+        .suggestion-card {
+            background: rgba(7,24,32,.88); border-radius: 16px;
+            border: 1px solid rgba(125,211,252,.13); cursor: pointer;
+            user-select: none; transition: border-color .18s ease, background .18s ease, transform .18s ease, box-shadow .18s ease;
+        }
+        .suggestion-card:hover {
+            border-color: rgba(94,234,212,.42); background: rgba(9,34,43,.94);
+            transform: translateY(-1px); box-shadow: 0 12px 30px rgba(0,0,0,.18);
+        }
+        .suggestion-card-selected {
+            border-color: rgba(94,234,212,.72) !important;
+            background: linear-gradient(135deg, rgba(15,66,68,.62), rgba(10,39,52,.94)) !important;
+            box-shadow: 0 0 0 1px rgba(94,234,212,.14), 0 14px 34px rgba(0,0,0,.24);
+        }
+        .suggestion-card-applied { cursor: default; opacity: .72; }
         .editor-image {
             width: min(100%, 980px); border-radius: 18px; overflow: hidden;
             border: 1px solid rgba(125,211,252,.20); background: #071017;
@@ -262,7 +276,7 @@ def main_page() -> None:
                     ui.label("01 // FIREWORKS ACCESS").classes("section-kicker")
                     ui.label("Connect your AI provider").classes("text-xl font-bold")
                     ui.label(
-                        "Aurora stays locked until a Fireworks API key is entered and successfully validated against the selected model."
+                        "Manual redaction works without an API key. Connect Fireworks only when you want AI-powered suggestions."
                     ).classes("muted text-sm")
                 connection_status_icon = ui.icon("vpn_key", size="28px").classes("text-slate-400")
 
@@ -301,7 +315,7 @@ def main_page() -> None:
                 connection_spinner = ui.spinner(size="22px").classes("text-teal-300")
                 connection_spinner.visible = False
                 connection_status = ui.label(
-                    "Not connected — enter a key, choose a model and press Connect."
+                    "Not connected — manual redaction is available; connect to enable AI scanning."
                 ).classes("connection-status muted text-sm flex-1")
 
             def update_selected_model_details(*_: object) -> None:
@@ -325,10 +339,11 @@ def main_page() -> None:
                 connection_status.classes(replace="connection-status text-sm text-amber-300 flex-1")
                 connection_status_icon.classes(replace="text-amber-300")
                 try:
-                    uploader.disable()
                     analyze_button.disable()
-                    editor_controls.visible = False
-                    workspace.visible = False
+                    progress_label.set_text("Connect a validated Fireworks API key to enable AI scanning.")
+                    analysis_status.set_text(
+                        "Manual redaction remains available. Connect Fireworks to run an AI privacy scan."
+                    )
                 except NameError:
                     pass
 
@@ -367,10 +382,11 @@ def main_page() -> None:
                         connection_status.classes(replace="connection-status text-sm text-emerald-300 flex-1")
                         connection_status_icon.classes(replace="text-emerald-300")
                         uploader.enable()
-                        analyze_button.enable()
-                        if state.file_bytes is not None:
-                            editor_controls.visible = True
-                            workspace.visible = True
+                        analyze_button.set_enabled(state.file_bytes is not None)
+                        progress_label.set_text("Ready to scan the uploaded document.")
+                        analysis_status.set_text(
+                            "Fireworks is connected. Configure the scan and review suggestions before applying them."
+                        )
                         ui.notify("API key connected successfully.", type="positive")
                     else:
                         state.fireworks_connected = False
@@ -379,11 +395,9 @@ def main_page() -> None:
                         connection_status.set_text(message)
                         connection_status.classes(replace="connection-status text-sm text-rose-300 flex-1")
                         connection_status_icon.classes(replace="text-rose-300")
-                        uploader.disable()
+                        uploader.enable()
                         analyze_button.disable()
-                        editor_controls.visible = False
-                        workspace.visible = False
-                        ui.notify("Invalid API key or unavailable model.", type="negative")
+                        ui.notify("Invalid API key or unavailable model. Manual redaction is still available.", type="negative")
                 except Exception as exc:
                     state.fireworks_connected = False
                     state.connected_api_key = None
@@ -391,11 +405,9 @@ def main_page() -> None:
                     connection_status.set_text(f"Connection check failed: {exc}")
                     connection_status.classes(replace="connection-status text-sm text-rose-300 flex-1")
                     connection_status_icon.classes(replace="text-rose-300")
-                    uploader.disable()
+                    uploader.enable()
                     analyze_button.disable()
-                    editor_controls.visible = False
-                    workspace.visible = False
-                    ui.notify("Could not validate the Fireworks connection.", type="negative")
+                    ui.notify("Could not validate Fireworks. Manual redaction is still available.", type="negative")
                 finally:
                     connection_spinner.visible = False
                     fireworks_api_key.enable()
@@ -414,9 +426,6 @@ def main_page() -> None:
             upload_status = ui.label("No file uploaded.").classes("muted")
 
             async def handle_upload(event: events.UploadEventArguments) -> None:
-                if not state.fireworks_connected:
-                    ui.notify("Connect a valid Fireworks API key before uploading a document.", type="warning")
-                    return
                 try:
                     if event.file.size() > MAX_UPLOAD_BYTES:
                         raise PdfError("The file is larger than the 50 MB starter limit.")
@@ -469,6 +478,15 @@ def main_page() -> None:
                 workspace.visible = True
                 await show_page(0)
                 render_suggestions()
+                analyze_button.set_enabled(state.fireworks_connected)
+                if state.fireworks_connected:
+                    progress_label.set_text("Ready to scan the uploaded document.")
+                    analysis_status.set_text("Fireworks is connected. Configure and run an AI privacy scan.")
+                else:
+                    progress_label.set_text("Connect Fireworks to enable AI scanning.")
+                    analysis_status.set_text(
+                        "Manual redaction is ready. AI scanning remains disabled until Fireworks is connected."
+                    )
                 invalidate_final_preview()
                 ui.notify(
                     "File loaded. Choose a selection mode and mark the content to remove.",
@@ -483,8 +501,10 @@ def main_page() -> None:
             ).props('accept="application/pdf,.pdf,image/jpeg,.jpg,.jpeg,image/png,.png,image/webp,.webp,image/bmp,.bmp"').classes(
                 "w-full"
             )
-            uploader.disable()
-            ui.label("Connect a valid Fireworks API key above to unlock uploads and AI redaction.").classes("muted text-xs")
+            uploader.enable()
+            ui.label(
+                "Manual redaction works locally without Fireworks. Connect an API key only to unlock AI suggestions."
+            ).classes("muted text-xs")
 
         editor_controls = ui.row().classes("toolbar w-full items-center gap-2 flex-wrap")
         editor_controls.visible = False
@@ -548,7 +568,7 @@ def main_page() -> None:
                     with ui.column().classes("gap-0"):
                         ui.label("04 // AI REVIEW").classes("section-kicker")
                         ui.label("AI redaction sidebar").classes("text-xl font-bold")
-                        ui.label("Configure the scan, then review every proposed redaction.").classes("muted text-sm")
+                        ui.label("Connect Fireworks to scan, then click suggestions to select or deselect them.").classes("muted text-sm")
                     ui.icon("shield", size="md").classes("text-teal-300")
 
                 with ui.column().classes("sidebar-section w-full gap-2"):
@@ -600,12 +620,12 @@ def main_page() -> None:
 
                     with ui.column().classes("progress-shell w-full gap-2") as scan_progress_shell:
                         with ui.row().classes("w-full items-center justify-between gap-2"):
-                            progress_label = ui.label("Waiting for a validated API connection.").classes("muted text-xs")
+                            progress_label = ui.label("Connect Fireworks to enable AI scanning.").classes("muted text-xs")
                             progress_percentage = ui.label("0%").classes("text-xs text-cyan-200")
                         scan_progress = ui.linear_progress(value=0).props("rounded color=primary track-color=blue-grey-10").classes("w-full")
                     scan_progress_shell.visible = False
                     analysis_status = ui.label(
-                        "Connect a Fireworks API key, upload a file, then run the scan."
+                        "Manual redaction is available now. Connect Fireworks to unlock AI scanning."
                     ).classes("scan-status muted text-sm")
 
                 with ui.column().classes("sidebar-section w-full gap-2"):
@@ -615,7 +635,7 @@ def main_page() -> None:
                             ui.label("Review and apply").classes("font-semibold")
                         ui.badge("HUMAN APPROVAL REQUIRED").props("outline color=positive")
                     ui.label(
-                        "Suggestions remain temporary overlays until selected and applied."
+                        "Click anywhere on a suggestion card to select or deselect it. Suggestions remain temporary until applied."
                     ).classes("muted text-xs")
                     with ui.row().classes("w-full gap-2 flex-wrap"):
                         select_all_button = ui.button("Select all", icon="done_all").props("outline dense")
@@ -764,13 +784,30 @@ def main_page() -> None:
                     return
 
                 for suggestion in suggestions:
-                    with ui.card().classes("suggestion-card w-full p-3"):
+                    card_classes = "suggestion-card w-full p-3"
+                    if suggestion.selected and not suggestion.applied:
+                        card_classes += " suggestion-card-selected"
+                    if suggestion.applied:
+                        card_classes += " suggestion-card-applied"
+
+                    def toggle_suggestion(item=suggestion) -> None:
+                        if item.applied or state.scan_in_progress:
+                            return
+                        item.selected = not item.selected
+                        render_suggestions()
+                        refresh_overlay()
+
+                    with ui.card().classes(card_classes).on("click", toggle_suggestion):
                         with ui.row().classes("w-full items-start gap-2"):
                             checkbox = ui.checkbox(value=suggestion.selected and not suggestion.applied)
-                            checkbox.set_enabled(not suggestion.applied)
+                            checkbox.set_enabled(not suggestion.applied and not state.scan_in_progress)
+                            checkbox.on("click", js_handler="event.stopPropagation()")
 
                             def update_selection(event: events.ValueChangeEventArguments, item=suggestion) -> None:
+                                if item.applied or state.scan_in_progress:
+                                    return
                                 item.selected = bool(event.value)
+                                render_suggestions()
                                 refresh_overlay()
 
                             checkbox.on_value_change(update_selection)
@@ -787,11 +824,12 @@ def main_page() -> None:
                                     "muted text-xs"
                                 )
                                 if suggestion.page_index != state.current_page:
-                                    ui.button(
+                                    show_page_button = ui.button(
                                         "Show page",
                                         icon="find_in_page",
                                         on_click=lambda page=suggestion.page_index: show_page(page),
                                     ).props("flat dense").classes("self-start")
+                                    show_page_button.on("click", js_handler="event.stopPropagation()")
 
         def threshold_changed(event: events.ValueChangeEventArguments) -> None:
             value = float(event.value or 0.60)
@@ -1070,12 +1108,10 @@ def main_page() -> None:
                 select_all_button.disable()
                 clear_selection_button.disable()
             else:
-                if state.fireworks_connected:
-                    uploader.enable()
-                    analyze_button.enable()
-                else:
-                    uploader.disable()
-                    analyze_button.disable()
+                uploader.enable()
+                analyze_button.set_enabled(
+                    state.fireworks_connected and state.file_bytes is not None
+                )
                 apply_suggestions_button.enable()
                 select_all_button.enable()
                 clear_selection_button.enable()

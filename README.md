@@ -7,10 +7,12 @@ A Python/NiceGUI application for manual and AI-assisted redaction of PDFs and or
 - Dark glass-style cybersecurity interface with rounded panels and an aurora blue/green palette.
 - **Ctrl+Z** undo for manual redactions, text selections, clearing a page and applying AI suggestions.
 - **Ctrl+Shift+Z** or **Ctrl+Y** redo.
-- A mandatory session-only Fireworks API-key connection step with explicit validation before the application unlocks.
+- An optional session-only Fireworks API-key connection step with explicit validation before AI scanning unlocks.
 - A Fireworks vision-model dropdown showing task strength, usage style and indicative serverless pricing. Changing the key or model invalidates the connection until it is checked again.
 - A live page-by-page scan progress bar. API credentials and model selection are locked while a scan is running.
 - A fully scrollable review sidebar split into separate scan-settings and suggestion sections.
+- Clickable suggestion cards with synchronized checkboxes and a clear selected-state highlight.
+- Full manual redaction, preview and export support without an API connection.
 - A custom AI instruction box, for example:
   - `Redact every visible web link.`
   - `Redact all faces and photographs containing people.`
@@ -33,8 +35,9 @@ A Python/NiceGUI application for manual and AI-assisted redaction of PDFs and or
 6. The rendered page, token IDs, custom instruction, category playbook and compact examples are sent to the configured Fireworks vision model.
 7. The scan reports live page-by-page progress while the API key and model controls remain locked.
 8. Findings appear as confidence-scored suggestions in the independently scrollable sidebar.
-9. Only selected suggestions become redaction regions.
-10. The final PDF or image is permanently rewritten before download.
+9. Click anywhere on a suggestion card, or use its checkbox, to select or deselect it.
+10. Only selected suggestions become redaction regions.
+11. The final PDF or image is permanently rewritten before download.
 
 ## Supported privacy categories
 
@@ -81,9 +84,9 @@ Open:
 http://127.0.0.1:8081
 ```
 
-Enter a Fireworks API key in the **Fireworks Access** section, choose a model and press **Connect API key**. Aurora sends a deliberately tiny validation request to confirm both the credentials and access to the selected model. The check may incur negligible token usage.
+Manual redaction is available immediately. To unlock AI suggestions, enter a Fireworks API key in the **Fireworks Access** section, choose a model and press **Connect API key**. Aurora sends a deliberately tiny validation request to confirm both the credentials and access to the selected model. The check may incur negligible token usage.
 
-The key is kept only in the current page session and is not written to disk by Aurora. Uploading and AI scanning remain locked until validation succeeds. There is no `.env` fallback and no local-only scan mode in this build. Editing either the key or selected model immediately invalidates the connection and requires another connection check.
+The key is kept only in the current page session and is not written to disk by Aurora. Manual uploading, box drawing, embedded-text selection, preview generation and export work without Fireworks. Only AI scanning remains locked until validation succeeds. There is no `.env` fallback and no unvalidated local-only AI scan mode in this build. Editing either the key or selected model immediately invalidates the connection and requires another connection check.
 
 For a remotely hosted deployment, use HTTPS before allowing users to enter API keys. Never place real API keys in source code, README files, screenshots or Git commits.
 
