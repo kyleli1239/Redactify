@@ -31,6 +31,28 @@ CLICK_TOLERANCE = 3.0
 RECT_MATCH_TOLERANCE = 0.8
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
+FIREWORKS_MODEL_CATALOG: dict[str, dict[str, str]] = {
+    "accounts/fireworks/models/minimax-m3": {
+        "label": "MiniMax M3 — Medium · best value",
+        "strength": "MEDIUM",
+        "billing": "Serverless: $0.30 input / $0.06 cached input / $1.20 output per 1M tokens",
+        "description": "Lowest-cost default. Native multimodal analysis with good document and screenshot coverage.",
+    },
+    "accounts/fireworks/models/qwen3p7-plus": {
+        "label": "Qwen 3.7 Plus — Strong · recommended",
+        "strength": "STRONG",
+        "billing": "Serverless: $0.40 input / $0.08 cached input / $1.60 output per 1M tokens",
+        "description": "Best quality-to-cost balance for visual document reasoning, complex layouts and contextual PII.",
+    },
+    "accounts/fireworks/models/kimi-k2p6": {
+        "label": "Kimi K2.6 — Strong · premium",
+        "strength": "STRONG",
+        "billing": "Serverless: $0.95 input / $0.16 cached input / $4.00 output per 1M tokens",
+        "description": "Premium multimodal reasoning for difficult pages and ambiguous visual context; costly for routine scans.",
+    },
+}
+DEFAULT_UI_FIREWORKS_MODEL = "accounts/fireworks/models/minimax-m3"
+
 
 @dataclass
 class HistorySnapshot:
@@ -168,6 +190,20 @@ def main_page() -> None:
         .q-uploader { border-radius: 16px; overflow: hidden; background: rgba(4,18,25,.62); border: 1px dashed rgba(94,234,212,.30); }
         .q-uploader__header { background: linear-gradient(110deg, rgba(20,91,91,.72), rgba(31,74,105,.62)); }
         .confidence-glow { color: #7dd3fc; }
+        .credential-panel, .model-panel {
+            border: 1px solid rgba(94,234,212,.17); border-radius: 16px;
+            background: linear-gradient(135deg, rgba(4,22,29,.78), rgba(8,28,38,.55));
+            padding: .8rem;
+        }
+        .security-note {
+            border-left: 2px solid rgba(94,234,212,.72); padding-left: .65rem;
+            color: #9ec2cc; font-size: .72rem; line-height: 1.45;
+        }
+        .model-strength {
+            width: fit-content; border: 1px solid rgba(125,211,252,.22); border-radius: 999px;
+            padding: .16rem .55rem; background: rgba(20,65,78,.42); color: #9df8e4;
+            font-family: "Cascadia Code", "Courier New", monospace; font-size: .68rem; letter-spacing: .08em;
+        }
         @media (max-width: 1180px) {
             .workspace-grid { grid-template-columns: 1fr; }
             .ai-sidebar { position: static; max-height: none; }
@@ -334,6 +370,48 @@ def main_page() -> None:
                 ui.label(
                     "Suggestions are only overlays until you tick them and press Apply selected. Names and addresses are now checked by both contextual rules and the vision model."
                 ).classes("muted text-xs")
+
+                with ui.column().classes("credential-panel w-full gap-1"):
+                    ui.label("FIREWORKS CONNECTION").classes("section-kicker")
+                    fireworks_api_key = ui.input(
+                        label="Fireworks API key",
+                        placeholder="fw_…",
+                        password=True,
+                        password_toggle_button=True,
+                    ).props("outlined dense autocomplete=new-password spellcheck=false").classes("w-full")
+                    ui.label(
+                        "Session-only: Aurora does not write the entered key to disk. It remains in this browser input and the current page session until cleared or closed. "
+                        "Leave it blank to use FIREWORKS_API_KEY from .env."
+                    ).classes("security-note")
+
+                with ui.column().classes("model-panel w-full gap-1"):
+                    ui.label("VISION MODEL").classes("section-kicker")
+                    vision_model_select = ui.select(
+                        options={
+                            model_id: details["label"]
+                            for model_id, details in FIREWORKS_MODEL_CATALOG.items()
+                        },
+                        value=DEFAULT_UI_FIREWORKS_MODEL,
+                        label="Fireworks model",
+                    ).props("outlined dense options-dense").classes("w-full")
+                    selected_model_strength = ui.label().classes("model-strength")
+                    selected_model_description = ui.label().classes("muted text-xs")
+                    selected_model_billing = ui.label().classes("text-xs text-cyan-200")
+                    ui.label(
+                        "Images are billed as input tokens. Prices are indicative Fireworks serverless rates checked in July 2026 and may change."
+                    ).classes("muted text-xs")
+
+                    def update_selected_model_details(*_: object) -> None:
+                        details = FIREWORKS_MODEL_CATALOG.get(
+                            str(vision_model_select.value),
+                            FIREWORKS_MODEL_CATALOG[DEFAULT_UI_FIREWORKS_MODEL],
+                        )
+                        selected_model_strength.set_text(f"TASK STRENGTH // {details['strength']}")
+                        selected_model_description.set_text(details["description"])
+                        selected_model_billing.set_text(details["billing"])
+
+                    vision_model_select.on_value_change(update_selected_model_details)
+                    update_selected_model_details()
 
                 with ui.row().classes("w-full items-center gap-3 flex-wrap"):
                     analysis_scope = ui.select(
@@ -796,6 +874,17 @@ def main_page() -> None:
                 ui.notify("Upload a PDF or image first.", type="warning")
                 return
 
+            entered_api_key = str(fireworks_api_key.value or "").strip()
+            selected_model = str(vision_model_select.value or DEFAULT_UI_FIREWORKS_MODEL).strip()
+            if selected_model not in FIREWORKS_MODEL_CATALOG:
+                selected_model = DEFAULT_UI_FIREWORKS_MODEL
+            if not entered_api_key and not os.getenv("FIREWORKS_API_KEY", "").strip():
+                ui.notify(
+                    "No Fireworks API key was supplied. The scan will use local OCR, pattern and QR detectors only.",
+                    type="warning",
+                    timeout=9000,
+                )
+
             if analysis_scope.value == "current":
                 page_indexes = [state.current_page]
                 state.ai_suggestions = [
@@ -835,6 +924,8 @@ def main_page() -> None:
                         use_ai=True,
                         run_ocr=bool(run_ocr_checkbox.value),
                         custom_instruction=str(custom_instruction.value or "").strip(),
+                        fireworks_api_key=entered_api_key or None,
+                        fireworks_model=selected_model,
                     )
                     state.ai_suggestions.extend(result.suggestions)
                     warnings.extend(result.warnings)
@@ -850,6 +941,9 @@ def main_page() -> None:
                 )
                 if not ai_was_used:
                     status += " The Fireworks vision model did not run; local detectors may still have produced suggestions."
+                else:
+                    model_label = FIREWORKS_MODEL_CATALOG[selected_model]["label"].split(" — ", 1)[0]
+                    status += f" Vision analysis used {model_label}."
                 analysis_status.set_text(status)
                 if warnings:
                     ui.notify(warnings[0], type="warning", timeout=10000)

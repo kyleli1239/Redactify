@@ -1152,17 +1152,25 @@ def _call_fireworks_vision(
     tokens: Sequence[AnalysisToken],
     page_index: int,
     custom_instruction: str = "",
+    api_key_override: str | None = None,
+    model_override: str | None = None,
 ) -> tuple[list[SensitiveSuggestion], list[str], bool]:
-    api_key = os.getenv("FIREWORKS_API_KEY", "").strip()
+    api_key = (api_key_override or os.getenv("FIREWORKS_API_KEY", "")).strip()
     if not api_key:
         return [], ["FIREWORKS_API_KEY is not configured, so only local pattern, OCR and QR detectors were used."], False
 
     model = (
-        os.getenv("FIREWORKS_VISION_MODEL", "").strip()
+        (model_override or "").strip()
+        or os.getenv("FIREWORKS_VISION_MODEL", "").strip()
         or os.getenv("FIREWORKS_MODEL", "").strip()
         or DEFAULT_FIREWORKS_MODEL
     )
     client = OpenAI(api_key=api_key, base_url=FIREWORKS_BASE_URL)
+
+    def safe_error(exc: Exception) -> str:
+        # Avoid reflecting a user-supplied secret into the UI if an SDK error ever includes it.
+        message = str(exc)
+        return message.replace(api_key, "[REDACTED_API_KEY]") if api_key else message
     token_lookup = {token.token_id: token for token in tokens}
     page_image = _document_crop(image, view)
     data_url = _image_data_url(page_image)
@@ -1236,7 +1244,7 @@ The response must match the supplied JSON schema."""
         content = response.choices[0].message.content or '{"findings":[]}'
         parsed = _VisionResponse.model_validate_json(_extract_json(content))
     except Exception as schema_exc:
-        errors.append(f"schema request: {schema_exc}")
+        errors.append(f"schema request: {safe_error(schema_exc)}")
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -1249,7 +1257,7 @@ The response must match the supplied JSON schema."""
             content = response.choices[0].message.content or '{"findings":[]}'
             parsed = _VisionResponse.model_validate_json(_extract_json(content))
         except Exception as json_exc:
-            errors.append(f"JSON request: {json_exc}")
+            errors.append(f"JSON request: {safe_error(json_exc)}")
             try:
                 response = client.chat.completions.create(
                     model=model,
@@ -1261,7 +1269,7 @@ The response must match the supplied JSON schema."""
                 content = response.choices[0].message.content or '{"findings":[]}'
                 parsed = _VisionResponse.model_validate_json(_extract_json(content))
             except Exception as plain_exc:
-                errors.append(f"plain request: {plain_exc}")
+                errors.append(f"plain request: {safe_error(plain_exc)}")
 
     if parsed is None:
         return [], [f"Fireworks vision analysis failed on page {page_index + 1}: {'; '.join(errors)}"], False
@@ -1372,6 +1380,8 @@ def analyze_page(
     use_ai: bool = True,
     run_ocr: bool = True,
     custom_instruction: str = "",
+    fireworks_api_key: str | None = None,
+    fireworks_model: str | None = None,
 ) -> AnalysisResult:
     embedded = embedded_tokens(embedded_words, page_index)
     warnings: list[str] = []
@@ -1409,6 +1419,8 @@ def analyze_page(
             tokens=tokens,
             page_index=page_index,
             custom_instruction=custom_instruction,
+            api_key_override=fireworks_api_key,
+            model_override=fireworks_model,
         )
         suggestions.extend(ai_findings)
         warnings.extend(ai_warnings)

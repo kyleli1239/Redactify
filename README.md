@@ -1,224 +1,135 @@
-# Redactify
+# Redactly Document & Image Redactor
 
-Redactify is an AI-assisted document and image redaction tool designed to help users permanently remove sensitive content and personally identifiable information (PII) from PDFs and images. The application combines local document processing with Fireworks AI vision analysis to detect likely private information, then lets users review and manually apply redactions with full control.
+A Python/NiceGUI application for manual and AI-assisted redaction of PDFs and ordinary image files. The interface uses a dark pearl-blue/green aurora theme, while every AI finding stays reviewable before it becomes a permanent redaction.
 
----
+## What is new
 
-## Hackathon context
+- Dark glass-style cybersecurity interface with rounded panels and an aurora blue/green palette.
+- **Ctrl+Z** undo for manual redactions, text selections, clearing a page and applying AI suggestions.
+- **Ctrl+Shift+Z** or **Ctrl+Y** redo.
+- A session-only Fireworks API-key field in the AI sidebar, with `.env` fallback.
+- A Fireworks vision-model dropdown showing task strength, usage style and indicative serverless pricing.
+- A custom AI instruction box, for example:
+  - `Redact every visible web link.`
+  - `Redact all faces and photographs containing people.`
+  - `Redact every signature and vehicle registration plate.`
+- Quick prompt presets for links, faces/photos and signatures.
+- Local URL matching when the user requests all links.
+- Local OpenCV face proposals when the user requests faces or pictures of people; the Fireworks vision model also checks the full page.
+- A reusable privacy knowledge pack covering all supported categories.
+- Synthetic few-shot examples supplied to the model on each scan.
+- Optional privacy-preserving local confidence calibration from accepted/rejected suggestions.
+- A starter JSONL dataset under `training_data/` for a future supervised fine-tuning workflow.
 
-Redactify was built for the AMD Developer Hackathon: ACT II — Track 3 Unicorn, July 6–11, 2026.
+## Detection pipeline
 
-The hackathon rules require projects to demonstrate AMD resource usage, and Redactify is explicitly designed around that requirement. The app showcases compute-heavy document workflows including PDF rendering, OCR, image analysis, and AI-powered vision inference in a containerized architecture that is ready to run on AMD-powered infrastructure. This makes the project more than a simple front-end demo: it demonstrates meaningful compute utilization through real document-processing workloads.
+1. PyMuPDF extracts embedded PDF text and exact word coordinates.
+2. RapidOCR reads scanned PDFs and images when **Use OCR** is enabled.
+3. Deterministic detectors catch rigid formats such as emails, tokens, IPs, IDs, cards, paths and authentication codes.
+4. Context detectors propose names and multi-line postal addresses.
+5. OpenCV detects QR codes and, when requested, face-like regions.
+6. The rendered page, token IDs, custom instruction, category playbook and compact examples are sent to the configured Fireworks vision model.
+7. Findings appear as confidence-scored suggestions in the sticky sidebar.
+8. Only selected suggestions become redaction regions.
+9. The final PDF or image is permanently rewritten before download.
 
----
+## Supported privacy categories
 
-## Why This Exists
+- email addresses
+- phone numbers
+- home addresses where reasonably detectable
+- usernames
+- full names where confidently detected
+- account numbers
+- bank card-like numbers
+- API keys
+- access tokens
+- passwords or password-like fields
+- database connection strings
+- private keys
+- IP addresses
+- file paths
+- URLs containing sensitive query parameters
+- student IDs
+- employee IDs
+- dates of birth
+- private chat messages or message panels
+- authentication codes
+- QR codes
 
-Manually redacting PDFs is tedious, error-prone, and doesn't scale. Lawyers, HR teams, healthcare administrators, and researchers spend hours hunting through documents to black out sensitive data before sharing them. **Redactify** automates this in one click, combining the speed of AMD-accelerated inference with the precision of a large language model.
+The custom instruction can additionally request ordinary links, faces/photos, signatures, logos, number plates or other visible/textual targets.
 
----
+## Run on Windows in VS Code
 
-## What Redactify does
+From the folder containing `app.py`:
 
-* Upload a PDF or image file
-* Draw boxes or select embedded PDF text to redact sensitive regions
-* Run AI-assisted scanning for emails, phone numbers, addresses, names, credentials, QR codes, and other sensitive patterns
-* Preview the final redacted output before downloading it
-* Remove metadata, hidden text, attachments, and JavaScript from PDFs where possible
-
-Redactify supports:
-
-* PDF documents
-* PNG images
-* JPEG images
-* WebP images
-* BMP images
-* Multi-page PDFs
-* Rotated PDF pages
-* Scanned documents
-* Screenshots and photographs of documents
-
-The default maximum upload size is **50 MB**.
-
-The AI never immediately modifies the uploaded file. Findings first appear in the review sidebar with:
-
-* Category
-* Confidence percentage
-* Masked preview
-* Detection source
-* Reason for the suggestion
-* Selection checkbox
-
-Users can select individual suggestions, select all visible suggestions or clear the current selection before applying anything.
-
-### Manual Redaction
-
-AI-assisted redaction speeds up identifying sensitive information, but it isn’t flawless. Fireworks AI may occasionally miss details or flag content incorrectly, so every detection includes a confidence score that users can review and adjust. A full manual redaction mode is also provided, ensuring users always have precise control over what is removed.
-
-* Click-and-drag redaction boxes
-* Embedded PDF text selection
-* Page-by-page navigation
-* Clear-page controls
-* Final output preview
-
-Embedded text selection snaps to the real word positions stored inside a PDF. Box drawing works with PDFs, scans, graphics and ordinary image files.
-
-### Undo and redo
-
-Redaction edits can be reversed using the interface buttons or keyboard shortcuts:
-
-```text
-Ctrl + Z          Undo
-Ctrl + Shift + Z  Redo
-Ctrl + Y          Redo
-```
-
-Manual redaction is also useful if a Fireworks API key is missing allowing you to still redact PPI without using the AI assistance tool
-
-
----
-
-## AI processing workflow
-
-```text
-Upload PDF or image
-        ↓
-Extract embedded PDF text
-        ↓
-Optionally run local OCR
-        ↓
-Run local pattern and contextual detectors
-        ↓
-Run QR and requested face/link detectors
-        ↓
-Send the rendered page and extracted tokens to Fireworks
-        ↓
-Display confidence-scored suggestions
-        ↓
-User approves or rejects suggestions
-        ↓
-Apply approved redaction regions
-        ↓
-Generate final preview
-        ↓
-Download permanently redacted output
-```
-
-## Technology stack
-
-* Python
-* NiceGUI
-* PyMuPDF
-* Pillow
-* OpenCV
-* RapidOCR
-* NumPy
-* Pydantic
-* OpenAI-compatible Fireworks client
-* python-dotenv
-
----
-
-## Local setup
-
-Requirements:
-
-- Python 3.10+
-- pip
-
-Install dependencies:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Create a file named `.env` in the project root:
-
-```env
-FIREWORKS_API_KEY=replace_with_your_fireworks_api_key
-FIREWORKS_VISION_MODEL=accounts/fireworks/models/minimax-m3
-
-HOST=0.0.0.0
-PORT=8081
-FIREWORKS_IMAGE_MAX_SIDE=1600
-```
-
-## Run locally
-
-```bash
+```powershell
+py -m venv .venv
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 python app.py
 ```
 
-Then open http://localhost:8081 in your browser.
-
-## Run with Docker
-
-```bash
-docker compose up --build
-```
-
-The app will be available at http://localhost:8081.
-
----
-
-## Confidence threshold
-
-The confidence slider controls which AI suggestions are shown.
-
-A lower value increases recall but may show more false positives. A higher value reduces noise but may hide uncertain sensitive information.
-
-Suggested starting points:
+Open:
 
 ```text
-0.55–0.65  Higher recall and more manual review
-0.70–0.80  Balanced review
-0.85–0.95  Only high-confidence suggestions
+http://127.0.0.1:8081
 ```
 
-The confidence score is a review aid, not a guarantee that a finding is correct.
+You can enter a Fireworks API key directly in the AI sidebar. The entered value overrides `.env` for the current page session and is not written to disk by Redactify. Clearing or closing the page removes the UI value.
 
----
+Alternatively, keep your existing `.env`, or copy `.env.example` to `.env` and add your Fireworks key. Leave the UI field blank to use the environment key. Never commit `.env`.
 
-## Detection knowledge and examples
+For a remotely hosted deployment, use HTTPS before allowing users to enter API keys.
 
-`redaction_knowledge.py` contains:
 
-* Category definitions
-* Positive examples
-* False-positive guidance
-* Visual detection guidance
-* Synthetic few-shot examples
+## Fireworks model selector
 
-These examples are included in the model instruction to make results more consistent.
+The sidebar includes a curated list of serverless models that currently accept image input. The model selected in the UI is passed to Fireworks for that scan.
 
-The file:
+| Model | Task strength | Indicative serverless billing per 1M tokens | Best use |
+|---|---|---|---|
+| MiniMax M3 | Medium | $0.30 input / $0.06 cached / $1.20 output | Lowest-cost default for routine forms, screenshots and documents |
+| Qwen 3.7 Plus | Strong | $0.40 input / $0.08 cached / $1.60 output | Recommended quality-to-cost balance for complex layouts and contextual PII |
+| Kimi K2.6 | Strong | $0.95 input / $0.16 cached / $4.00 output | Premium multimodal reasoning for difficult or ambiguous pages |
+
+Image content is billed as input tokens. Prices are informational values checked in July 2026 and may change; confirm current rates in the Fireworks model library before production use.
+
+The strength rating is relative to this redaction-review task, not a general benchmark score. Local OCR, regular-expression detectors and QR detection still run regardless of the selected model.
+
+## Custom AI instructions
+
+The instruction is treated as an additional target; it does not replace the standard privacy scan. Text findings use exact OCR/PDF token boxes when possible. Visual findings use bounding boxes.
+
+Examples:
 
 ```text
-training_data/redaction_examples.jsonl
+Redact all visible links, including ordinary public URLs.
+Redact all profile pictures, faces and photographs containing people.
+Redact signatures, handwritten initials and passport photographs.
+Redact every mention of Project Aurora and its logo.
 ```
 
-contains starter synthetic examples for future experimentation.
+## About the included “training” data
 
-These files do not train the model automatically. They provide rules and in-context examples during inference.
+`redaction_knowledge.py` and `training_data/redaction_examples.jsonl` improve inference through stronger instructions and few-shot examples. They **do not change the model’s weights**.
 
-See `TRAINING.md` for a longer-term vision-model fine-tuning plan.
+The optional local review setting stores only category, confidence, source and accept/reject metadata in `data/redaction_feedback.jsonl`. It never stores document text, images, coordinates or secret previews. Once enough reviews exist, the app applies a very small category-level confidence calibration.
 
----
+Actual vision-model fine-tuning must be run as a separate Fireworks training job using an image-and-text labelled dataset and a model supported for VLM fine-tuning. Fine-tuned LoRA models require an on-demand deployment rather than Fireworks serverless inference. See `TRAINING.md` for the recommended future path.
 
-## Current limitations
+## Main files
 
-This is just a working prototype. Some features have not been fully developed.
+- `app.py` — themed NiceGUI interface, keyboard history, sidebar and custom prompt
+- `ai_service.py` — OCR, local detectors, custom prompt handling and Fireworks vision integration
+- `redaction_knowledge.py` — category playbook and synthetic in-context examples
+- `feedback_store.py` — privacy-preserving local confidence calibration
+- `training_data/redaction_examples.jsonl` — starter synthetic dataset
+- `pdf_service.py` — rendering, coordinates and permanent PDF/image redaction
+- `.env.example` — safe environment-variable template
 
-* Password-protected PDFs are not supported.
-* OCR accuracy depends on image quality.
-* Handwriting detection is limited.
-* Face detection may miss profiles, obscured faces or very small photographs.
-* Vision-model bounding boxes may be approximate.
-* AI confidence is not a security guarantee.
-* Large multi-page documents may require significant API usage.
-* Malformed PDFs may prevent optional deep sanitisation.
-* The model can miss context-dependent information.
-* Training examples do not automatically fine-tune model weights.
-* The final output must always be manually inspected.
+## Privacy
+
+Running the Fireworks scan sends the rendered page, extracted text tokens and the selected model ID to Fireworks using the supplied API key. Redactify does not intentionally log or save a key entered in the UI. Only process documents you are authorised to send to a third-party API. Always review suggestions and the final preview: OCR, heuristics and vision models can miss content or produce false positives.
