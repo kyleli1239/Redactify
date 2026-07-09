@@ -1,193 +1,224 @@
-# Aurora Document & Image Redactor
+# Redactify
 
-Aurora is a Python/NiceGUI application for permanent manual and AI-assisted redaction of PDFs and image files. It uses a dark pearl-blue/green cybersecurity interface and keeps every AI finding reviewable before it becomes a redaction.
+Redactify is an AI-assisted document and image redaction tool designed to help users permanently remove sensitive content and personally identifiable information (PII) from PDFs and images. The application combines local document processing with Fireworks AI vision analysis to detect likely private information, then lets users review and manually apply redactions with full control.
 
-## Current capabilities
+---
 
-- Upload PDFs, PNG, JPEG, WebP and BMP files.
-- Draw permanent redaction boxes manually without an API key.
-- Select real embedded PDF text and redact exact word regions.
-- Undo with `Ctrl+Z`; redo with `Ctrl+Shift+Z` or `Ctrl+Y`.
-- Preview the rewritten output before downloading it.
-- Enter and validate a Fireworks API key in the UI.
-- Choose MiniMax M3, Qwen 3.7 Plus or Kimi K2.6.
-- Run OCR on scanned pages and images.
-- Review confidence-scored AI suggestions in a scrollable sidebar.
-- Click suggestion cards or checkboxes to select and deselect them.
-- Apply only the selected suggestions.
-- Add a custom instruction, including strict instructions such as `Only redact phone numbers`.
+## Hackathon context
 
-## Important detection behaviour
+Redactify was built for the AMD Developer Hackathon: ACT II — Track 3 Unicorn, July 6–11, 2026.
 
-The Fireworks vision model is the sole classifier for AI PII suggestions. OCR and embedded PDF extraction supply text and exact coordinates, but regex-based PII findings are not merged into AI scan results.
+The hackathon rules require projects to demonstrate AMD resource usage, and Redactify is explicitly designed around that requirement. The app showcases compute-heavy document workflows including PDF rendering, OCR, image analysis, and AI-powered vision inference in a containerized architecture that is ready to run on AMD-powered infrastructure. This makes the project more than a simple front-end demo: it demonstrates meaningful compute utilization through real document-processing workloads.
 
-Local QR-code localisation may still propose precise QR regions because it is a computer-vision detector rather than a text-pattern detector.
+---
 
-### Blank custom instruction
+## Why This Exists
 
-Leaving the custom instruction blank runs the complete privacy scan.
+Manually redacting PDFs is tedious, error-prone, and doesn't scale. Lawyers, HR teams, healthcare administrators, and researchers spend hours hunting through documents to black out sensitive data before sharing them. **Redactify** automates this in one click, combining the speed of AMD-accelerated inference with the precision of a large language model.
 
-### Additive custom instruction
+---
 
-An ordinary instruction adds a custom target while retaining the normal privacy scan:
+## What Redactify does
+
+* Upload a PDF or image file
+* Draw boxes or select embedded PDF text to redact sensitive regions
+* Run AI-assisted scanning for emails, phone numbers, addresses, names, credentials, QR codes, and other sensitive patterns
+* Preview the final redacted output before downloading it
+* Remove metadata, hidden text, attachments, and JavaScript from PDFs where possible
+
+Redactify supports:
+
+* PDF documents
+* PNG images
+* JPEG images
+* WebP images
+* BMP images
+* Multi-page PDFs
+* Rotated PDF pages
+* Scanned documents
+* Screenshots and photographs of documents
+
+The default maximum upload size is **50 MB**.
+
+The AI never immediately modifies the uploaded file. Findings first appear in the review sidebar with:
+
+* Category
+* Confidence percentage
+* Masked preview
+* Detection source
+* Reason for the suggestion
+* Selection checkbox
+
+Users can select individual suggestions, select all visible suggestions or clear the current selection before applying anything.
+
+### Manual Redaction
+
+AI-assisted redaction speeds up identifying sensitive information, but it isn’t flawless. Fireworks AI may occasionally miss details or flag content incorrectly, so every detection includes a confidence score that users can review and adjust. A full manual redaction mode is also provided, ensuring users always have precise control over what is removed.
+
+* Click-and-drag redaction boxes
+* Embedded PDF text selection
+* Page-by-page navigation
+* Clear-page controls
+* Final output preview
+
+Embedded text selection snaps to the real word positions stored inside a PDF. Box drawing works with PDFs, scans, graphics and ordinary image files.
+
+### Undo and redo
+
+Redaction edits can be reversed using the interface buttons or keyboard shortcuts:
 
 ```text
-Redact all faces and vehicle registration plates.
+Ctrl + Z          Undo
+Ctrl + Shift + Z  Redo
+Ctrl + Y          Redo
 ```
 
-### Exclusive custom instruction
+Manual redaction is also useful if a Fireworks API key is missing allowing you to still redact PPI without using the AI assistance tool
 
-Words such as `only`, `just`, `exclusively` or `solely` restrict the result categories:
+
+---
+
+## AI processing workflow
 
 ```text
-Only redact phone numbers.
+Upload PDF or image
+        ↓
+Extract embedded PDF text
+        ↓
+Optionally run local OCR
+        ↓
+Run local pattern and contextual detectors
+        ↓
+Run QR and requested face/link detectors
+        ↓
+Send the rendered page and extracted tokens to Fireworks
+        ↓
+Display confidence-scored suggestions
+        ↓
+User approves or rejects suggestions
+        ↓
+Apply approved redaction regions
+        ↓
+Generate final preview
+        ↓
+Download permanently redacted output
 ```
 
-Aurora reinforces this rule in the model prompt and filters the returned results again before showing them, preventing unrelated categories from appearing.
+## Technology stack
 
-## Supported privacy categories
+* Python
+* NiceGUI
+* PyMuPDF
+* Pillow
+* OpenCV
+* RapidOCR
+* NumPy
+* Pydantic
+* OpenAI-compatible Fireworks client
+* python-dotenv
 
-- Email addresses
-- Phone numbers
-- Home and postal addresses
-- Usernames
-- Full personal names
-- Account numbers
-- Bank-card-like numbers
-- API keys
-- Access tokens
-- Passwords and password-like values
-- Database connection strings
-- Private keys
-- IP addresses
-- File paths
-- URLs containing sensitive query parameters
-- Student IDs
-- Employee IDs
-- Dates of birth
-- Private chat messages and message panels
-- Authentication, OTP and MFA codes
-- QR codes
-- Ordinary links when requested
-- Faces and photographs when requested
-- Arbitrary custom text or visual regions
+---
 
-## Fireworks models
+## Local setup
 
-| Model | Relative strength | Indicative serverless billing per 1M tokens | Notes |
-|---|---:|---:|---|
-| MiniMax M3 | Medium | $0.30 input / $0.06 cached / $1.20 output | Lowest-cost default for routine forms and screenshots |
-| Qwen 3.7 Plus | Strong | $0.40 input / $0.08 cached / $1.60 output | Recommended quality-to-cost balance |
-| Kimi K2.6 | Strong | $0.95 input / $0.16 cached / $4.00 output | Premium model for difficult pages; usually slower |
+Requirements:
 
-Prices are indicative and can change. Check the Fireworks model library before production use.
+- Python 3.10+
+- pip
 
-Aurora uses model-specific scan settings. Kimi K2.6 runs with low reasoning effort, a smaller response budget and a longer timeout to reduce unnecessary delay.
+Install dependencies:
 
-## Progress behaviour
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-Fireworks does not expose an exact page-analysis percentage. During a model request, Aurora therefore shows an elapsed-time heartbeat and advances conservatively within the current page stage. This confirms the request is still active without falsely claiming that the model is nearly finished.
+Create a file named `.env` in the project root:
 
-The scan now uses one JSON-mode Fireworks request per page instead of repeatedly trying several long response formats. If the request fails, the old suggestion set is restored and partial new results are discarded.
+```env
+FIREWORKS_API_KEY=replace_with_your_fireworks_api_key
+FIREWORKS_VISION_MODEL=accounts/fireworks/models/minimax-m3
 
-## Accuracy improvements
+HOST=0.0.0.0
+PORT=8081
+FIREWORKS_IMAGE_MAX_SIDE=1600
+```
 
-- The page image is sent at up to 2048 pixels on its longest side by default.
-- OCR and embedded-text tokens include normalised coordinates as well as token IDs.
-- The model can return token IDs for exact text boxes or visual bounding boxes for scanned and graphical regions.
-- Names and addresses receive explicit contextual instructions and synthetic examples.
-- Suggestion counts show how many results are visible and how many are hidden by the confidence threshold.
-- Local approval calibration is only applied when the user enables it.
+## Run locally
 
-## Install and run on Windows
-
-Open the project folder in VS Code and run:
-
-```powershell
-py -m venv .venv
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+```bash
 python app.py
 ```
 
-Open:
+Then open http://localhost:8081 in your browser.
+
+## Run with Docker
+
+```bash
+docker compose up --build
+```
+
+The app will be available at http://localhost:8081.
+
+---
+
+## Confidence threshold
+
+The confidence slider controls which AI suggestions are shown.
+
+A lower value increases recall but may show more false positives. A higher value reduces noise but may hide uncertain sensitive information.
+
+Suggested starting points:
 
 ```text
-http://127.0.0.1:8081
+0.55–0.65  Higher recall and more manual review
+0.70–0.80  Balanced review
+0.85–0.95  Only high-confidence suggestions
 ```
 
-Manual redaction works immediately. AI scanning stays disabled until a Fireworks API key and model are validated through the **Connect API key** button.
+The confidence score is a review aid, not a guarantee that a finding is correct.
 
-## Optional runtime settings
+---
 
-The API key is entered in the UI and is not read from `.env`. The `.env` file can contain local runtime settings:
+## Detection knowledge and examples
 
-```env
-FIREWORKS_IMAGE_MAX_SIDE=2048
-HOST=0.0.0.0
-PORT=8081
-```
+`redaction_knowledge.py` contains:
 
-The entered API key is held only in the current page session and is not written to disk by Aurora.
+* Category definitions
+* Positive examples
+* False-positive guidance
+* Visual detection guidance
+* Synthetic few-shot examples
 
-## Basic workflow
+These examples are included in the model instruction to make results more consistent.
 
-1. Upload a PDF or image.
-2. Add any manual boxes or embedded-text selections.
-3. Optionally connect Fireworks and choose a model.
-4. Enable OCR for scans, screenshots or image files.
-5. Leave the instruction blank for a full scan, or type a custom scope.
-6. Run the AI scan.
-7. Review the suggestion cards.
-8. Select only the suggestions you want.
-9. Press **Apply selected**.
-10. Generate the final preview.
-11. Inspect and download the permanently rewritten output.
-
-## Project structure
+The file:
 
 ```text
-.
-├── app.py
-├── ai_service.py
-├── pdf_service.py
-├── redaction_knowledge.py
-├── feedback_store.py
-├── requirements.txt
-├── README.md
-├── TRAINING.md
-├── Dockerfile
-├── compose.yaml
-├── .env.example
-└── training_data/
-    └── redaction_examples.jsonl
+training_data/redaction_examples.jsonl
 ```
 
-### Main files
+contains starter synthetic examples for future experimentation.
 
-- `app.py`: NiceGUI interface, keyboard history, scan progress and suggestion review.
-- `ai_service.py`: OCR, token mapping, QR localisation, Fireworks request and result parsing.
-- `pdf_service.py`: rendering, coordinates and permanent PDF/image redaction.
-- `redaction_knowledge.py`: category definitions and synthetic in-context examples.
-- `feedback_store.py`: optional category-level review calibration without storing document contents.
-- `TRAINING.md`: future vision-model fine-tuning guidance.
+These files do not train the model automatically. They provide rules and in-context examples during inference.
 
-## Privacy and security
+See `TRAINING.md` for a longer-term vision-model fine-tuning plan.
 
-Running an AI scan sends the rendered page and extracted text tokens to Fireworks using the key entered by the user. Manual redaction, preview and export can be used without sending the document to Fireworks.
-
-Do not hard-code or commit API keys. Use HTTPS before deploying Aurora remotely. Only process documents that you are authorised to send to an external AI provider.
-
-AI, OCR and visual bounding boxes can produce false positives or false negatives. Always inspect every page of the final exported file before sharing it.
+---
 
 ## Current limitations
 
-- Password-protected PDFs are not supported.
-- Handwriting and very small text can be missed.
-- Serverless models can experience latency or capacity variation.
-- Kimi K2.6 can remain slower than the smaller options even with low reasoning effort.
-- Model bounding boxes may be approximate.
-- Custom requests depend on the selected model understanding the requested target.
-- This prototype is not a certified legal, compliance or classified-document redaction system.
+This is just a working prototype. Some features have not been fully developed.
+
+* Password-protected PDFs are not supported.
+* OCR accuracy depends on image quality.
+* Handwriting detection is limited.
+* Face detection may miss profiles, obscured faces or very small photographs.
+* Vision-model bounding boxes may be approximate.
+* AI confidence is not a security guarantee.
+* Large multi-page documents may require significant API usage.
+* Malformed PDFs may prevent optional deep sanitisation.
+* The model can miss context-dependent information.
+* Training examples do not automatically fine-tune model weights.
+* The final output must always be manually inspected.
