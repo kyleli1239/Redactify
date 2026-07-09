@@ -176,7 +176,17 @@ def main_page() -> None:
             background: linear-gradient(90deg, #5eead4, #7dd3fc, #a78bfa);
         }
         .suggestion-scroll {
-            min-height: 190px; overflow: visible; padding-right: .15rem;
+            max-height: calc(100vh - 640px); min-height: 175px;
+            overflow-y: auto; overflow-x: hidden; padding-right: .30rem;
+            scrollbar-color: rgba(94,234,212,.48) rgba(3,17,24,.24);
+            scrollbar-width: thin;
+        }
+        .suggestion-scroll::-webkit-scrollbar { width: 8px; }
+        .suggestion-scroll::-webkit-scrollbar-track {
+            background: rgba(3,17,24,.24); border-radius: 10px;
+        }
+        .suggestion-scroll::-webkit-scrollbar-thumb {
+            background: linear-gradient(#5eead4, #7dd3fc); border-radius: 10px;
         }
         .sidebar-section {
             border: 1px solid rgba(125,211,252,.14); border-radius: 18px;
@@ -778,11 +788,20 @@ def main_page() -> None:
             ]
 
         def render_suggestions() -> None:
+            """Render the current AI findings in the original scrollable card list.
+
+            This intentionally follows the last working implementation: clear the
+            existing card children, then recreate the visible findings directly inside
+            the already-mounted sidebar container.
+            """
             suggestions_container.clear()
             suggestions = visible_suggestions()
+
             with suggestions_container:
                 if not suggestions:
-                    ui.label("No suggestions at the current confidence threshold.").classes("muted text-sm")
+                    ui.label("No suggestions at the current confidence threshold.").classes(
+                        "muted text-sm p-2"
+                    )
                     return
 
                 for suggestion in suggestions:
@@ -800,12 +819,19 @@ def main_page() -> None:
                         refresh_overlay()
 
                     with ui.card().classes(card_classes).on("click", toggle_suggestion):
-                        with ui.row().classes("w-full items-start gap-2"):
-                            checkbox = ui.checkbox(value=suggestion.selected and not suggestion.applied)
-                            checkbox.set_enabled(not suggestion.applied and not state.scan_in_progress)
+                        with ui.row().classes("w-full items-start gap-2 no-wrap"):
+                            checkbox = ui.checkbox(
+                                value=suggestion.selected and not suggestion.applied
+                            )
+                            checkbox.set_enabled(
+                                not suggestion.applied and not state.scan_in_progress
+                            )
                             checkbox.on("click", js_handler="event.stopPropagation()")
 
-                            def update_selection(event: events.ValueChangeEventArguments, item=suggestion) -> None:
+                            def update_selection(
+                                event: events.ValueChangeEventArguments,
+                                item=suggestion,
+                            ) -> None:
                                 if item.applied or state.scan_in_progress:
                                     return
                                 item.selected = bool(event.value)
@@ -813,25 +839,44 @@ def main_page() -> None:
                                 refresh_overlay()
 
                             checkbox.on_value_change(update_selection)
-                            with ui.column().classes("grow gap-0"):
-                                with ui.row().classes("items-center gap-2 flex-wrap"):
+
+                            with ui.column().classes("grow min-w-0 gap-1"):
+                                with ui.row().classes(
+                                    "w-full items-center gap-2 flex-wrap"
+                                ):
                                     ui.badge(suggestion.category_label)
-                                    ui.label(f"{suggestion.confidence * 100:.0f}% • Page {suggestion.page_index + 1}").classes(
-                                        "font-semibold confidence-glow"
-                                    )
+                                    ui.label(
+                                        f"{suggestion.confidence * 100:.0f}% • "
+                                        f"Page {suggestion.page_index + 1}"
+                                    ).classes("font-semibold confidence-glow")
+                                    if len(suggestion.rects) > 1:
+                                        ui.badge(
+                                            f"{len(suggestion.rects)} regions"
+                                        ).props("outline color=secondary")
                                     if suggestion.applied:
                                         ui.badge("Applied").props("color=positive")
-                                ui.label(suggestion.preview).classes("text-sm break-all")
-                                ui.label(f"{suggestion.reason} Source: {suggestion.source}.").classes(
-                                    "muted text-xs"
-                                )
+
+                                ui.linear_progress(
+                                    value=suggestion.confidence
+                                ).props(
+                                    "rounded color=primary track-color=blue-grey-10"
+                                ).classes("w-full")
+                                ui.label(
+                                    suggestion.preview or "Sensitive region"
+                                ).classes("text-sm break-all")
+                                ui.label(
+                                    f"{suggestion.reason} Source: {suggestion.source}."
+                                ).classes("muted text-xs break-words")
+
                                 if suggestion.page_index != state.current_page:
                                     show_page_button = ui.button(
                                         "Show page",
                                         icon="find_in_page",
                                         on_click=lambda page=suggestion.page_index: show_page(page),
                                     ).props("flat dense").classes("self-start")
-                                    show_page_button.on("click", js_handler="event.stopPropagation()")
+                                    show_page_button.on(
+                                        "click", js_handler="event.stopPropagation()"
+                                    )
 
         def threshold_changed(event: events.ValueChangeEventArguments) -> None:
             value = float(event.value or 0.50)
@@ -1122,43 +1167,58 @@ def main_page() -> None:
             if state.scan_in_progress:
                 return
             if not state.fireworks_connected or not state.connected_api_key or not state.connected_model:
-                ui.notify("Connect and validate a Fireworks API key before running a scan.", type="warning")
+                ui.notify(
+                    "Connect and validate a Fireworks API key before running a scan.",
+                    type="warning",
+                )
                 return
             if state.file_bytes is None or state.kind is None:
                 ui.notify("Upload a PDF or image first.", type="warning")
                 return
 
             entered_api_key = str(fireworks_api_key.value or "").strip()
-            selected_model = str(vision_model_select.value or DEFAULT_UI_FIREWORKS_MODEL).strip()
+            selected_model = str(
+                vision_model_select.value or DEFAULT_UI_FIREWORKS_MODEL
+            ).strip()
             if (
                 entered_api_key != state.connected_api_key
                 or selected_model != state.connected_model
             ):
                 invalidate_fireworks_connection()
-                ui.notify("The API key or model changed. Press Connect again before scanning.", type="warning")
+                ui.notify(
+                    "The API key or model changed. Press Connect again before scanning.",
+                    type="warning",
+                )
                 return
 
+            previous_suggestions = list(state.ai_suggestions)
             if analysis_scope.value == "current":
                 page_indexes = [state.current_page]
-                retained_suggestions = [
+                state.ai_suggestions = [
                     suggestion
                     for suggestion in state.ai_suggestions
                     if suggestion.page_index != state.current_page
                 ]
             else:
                 page_indexes = list(range(state.page_count))
-                retained_suggestions = []
+                state.ai_suggestions = []
 
-            previous_suggestions = state.ai_suggestions
-            scanned_suggestions: list[SensitiveSuggestion] = []
+            # This immediate render is part of the original working flow. It removes
+            # stale cards before new pages are appended and rendered one by one.
+            render_suggestions()
+            refresh_overlay()
+
             warnings: list[str] = []
             total_tokens = 0
+            total_new_suggestions = 0
             total_pages = max(len(page_indexes), 1)
 
             set_scan_controls_locked(True)
             scan_progress_shell.visible = True
             set_scan_progress(0.0, "Preparing the scan…")
-            analysis_status.set_text("AI scan in progress. Connection and model settings are locked.")
+            analysis_status.set_text(
+                "AI scan in progress. Connection and model settings are locked."
+            )
 
             try:
                 for position, page_index in enumerate(page_indexes, start=1):
@@ -1170,18 +1230,24 @@ def main_page() -> None:
                     )
 
                     if state.kind == "pdf":
-                        image, view = await run.io_bound(render_page, state.file_bytes, page_index)
+                        image, view = await run.io_bound(
+                            render_page, state.file_bytes, page_index
+                        )
                         words = state.words_by_page.get(page_index)
                         if words is None:
-                            words = await run.io_bound(extract_page_words, state.file_bytes, page_index)
+                            words = await run.io_bound(
+                                extract_page_words, state.file_bytes, page_index
+                            )
                             state.words_by_page[page_index] = words
                     else:
-                        image, view = await run.io_bound(render_image, state.file_bytes)
+                        image, view = await run.io_bound(
+                            render_image, state.file_bytes
+                        )
                         words = []
 
                     set_scan_progress(
                         page_start + page_span * 0.25,
-                        f"Running OCR, local detectors and Fireworks vision on page {page_index + 1}…",
+                        f"Running OCR and Fireworks vision on page {page_index + 1}…",
                     )
                     result = await run.io_bound(
                         analyze_page,
@@ -1191,7 +1257,9 @@ def main_page() -> None:
                         embedded_words=words,
                         use_ai=True,
                         run_ocr=bool(run_ocr_checkbox.value),
-                        custom_instruction=str(custom_instruction.value or "").strip(),
+                        custom_instruction=str(
+                            custom_instruction.value or ""
+                        ).strip(),
                         fireworks_api_key=state.connected_api_key,
                         fireworks_model=state.connected_model,
                         use_local_calibration=bool(learn_from_review.value),
@@ -1200,36 +1268,65 @@ def main_page() -> None:
                         raise RuntimeError(
                             "Fireworks vision did not complete, so no local-only scan was accepted."
                         )
-                    scanned_suggestions.extend(result.suggestions)
+
+                    # Exact behaviour from the working version: append to the live state
+                    # and rebuild the visible list immediately after each analysed page.
+                    state.ai_suggestions.extend(result.suggestions)
+                    total_new_suggestions += len(result.suggestions)
                     warnings.extend(result.warnings)
                     total_tokens += result.token_count
+                    render_suggestions()
+                    refresh_overlay()
+
                     set_scan_progress(
                         position / total_pages,
                         f"Completed page {page_index + 1} ({position}/{total_pages}).",
                     )
 
-                state.ai_suggestions = retained_suggestions + scanned_suggestions
-                render_suggestions()
-                refresh_overlay()
                 visible_count = len(visible_suggestions())
-                model_label = FIREWORKS_MODEL_CATALOG[state.connected_model]["label"].split(" — ", 1)[0]
-                status = (
-                    f"Found {len(scanned_suggestions)} new suggestion(s); {visible_count} meet the current threshold. "
-                    f"Analysed {total_tokens} text token(s) using {model_label}."
+                model_label = FIREWORKS_MODEL_CATALOG[
+                    state.connected_model
+                ]["label"].split(" — ", 1)[0]
+                instruction_text = str(
+                    custom_instruction.value or ""
+                ).strip()
+                scope_note = (
+                    f" Instruction: {instruction_text}"
+                    if instruction_text
+                    else ""
                 )
-                analysis_status.set_text(status)
-                set_scan_progress(1.0, "Scan complete — review the suggestions below.")
+                analysis_status.set_text(
+                    f"Found {total_new_suggestions} new suggestion(s); "
+                    f"{visible_count} meet the current threshold. "
+                    f"Analysed {total_tokens} text token(s) using "
+                    f"{model_label}.{scope_note}"
+                )
+                set_scan_progress(
+                    1.0, "Scan complete — review the suggestions below."
+                )
                 if warnings:
                     ui.notify(warnings[0], type="warning", timeout=10000)
                 else:
-                    ui.notify("Sensitive-information scan complete.", type="positive")
+                    ui.notify(
+                        "Sensitive-information scan complete.",
+                        type="positive",
+                    )
             except Exception as exc:
                 state.ai_suggestions = previous_suggestions
                 render_suggestions()
                 refresh_overlay()
-                analysis_status.set_text("The scan failed. No partial scan results were applied.")
-                set_scan_progress(0.0, "Scan failed — check the connection message and try again.")
-                ui.notify(f"AI scan failed: {exc}", type="negative", timeout=12000)
+                analysis_status.set_text(
+                    "The scan failed. Previous suggestions were restored."
+                )
+                set_scan_progress(
+                    0.0,
+                    "Scan failed — check the connection message and try again.",
+                )
+                ui.notify(
+                    f"AI scan failed: {exc}",
+                    type="negative",
+                    timeout=12000,
+                )
             finally:
                 set_scan_controls_locked(False)
 
