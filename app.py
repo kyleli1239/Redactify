@@ -32,7 +32,6 @@ MIN_RECT_SIZE = 2.0
 CLICK_TOLERANCE = 3.0
 RECT_MATCH_TOLERANCE = 0.8
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
-MAX_SUGGESTION_CARDS = 60
 
 FIREWORKS_MODEL_CATALOG: dict[str, dict[str, str]] = {
     "accounts/fireworks/models/minimax-m3": {
@@ -51,7 +50,7 @@ FIREWORKS_MODEL_CATALOG: dict[str, dict[str, str]] = {
         "label": "Kimi K2.6 — Strong · premium",
         "strength": "STRONG",
         "billing": "Serverless: $0.95 input / $0.16 cached input / $4.00 output per 1M tokens",
-        "description": "Premium multimodal reasoning for difficult pages. Aurora uses low reasoning effort and a longer timeout; expect slower scans than MiniMax or Qwen.",
+        "description": "Premium multimodal reasoning for difficult pages and ambiguous visual context; costly for routine scans.",
     },
 }
 DEFAULT_UI_FIREWORKS_MODEL = "accounts/fireworks/models/minimax-m3"
@@ -152,7 +151,7 @@ def main_page() -> None:
         .glass-card { transition: border-color .2s ease, transform .2s ease, box-shadow .2s ease; }
         .glass-card:hover { border-color: rgba(94,234,212,.27); box-shadow: 0 22px 65px rgba(0,0,0,.28); }
         .workspace-grid {
-            display: grid; grid-template-columns: minmax(0, 1fr) 450px;
+            display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, 430px);
             align-items: start; gap: 1.15rem;
         }
         .editor-column { min-width: 0; }
@@ -179,14 +178,12 @@ def main_page() -> None:
         .suggestion-scroll {
             min-height: 190px; max-height: 460px; width: 100%;
             overflow-y: auto; overflow-x: hidden; padding-right: .35rem;
-            align-content: flex-start;
             scrollbar-color: rgba(94,234,212,.48) rgba(3,17,24,.35);
             scrollbar-width: thin;
         }
         .suggestion-scroll::-webkit-scrollbar { width: 7px; }
         .suggestion-scroll::-webkit-scrollbar-track { background: rgba(3,17,24,.35); border-radius: 10px; }
         .suggestion-scroll::-webkit-scrollbar-thumb { background: linear-gradient(#5eead4, #7dd3fc); border-radius: 10px; }
-        .suggestion-scroll > * { width: 100%; }
         .sidebar-section {
             border: 1px solid rgba(125,211,252,.14); border-radius: 18px;
             background: linear-gradient(135deg, rgba(4,22,29,.72), rgba(8,28,38,.48));
@@ -256,7 +253,7 @@ def main_page() -> None:
             padding: .16rem .55rem; background: rgba(20,65,78,.42); color: #9df8e4;
             font-family: "Cascadia Code", "Courier New", monospace; font-size: .68rem; letter-spacing: .08em;
         }
-        @media (max-width: 1180px) {
+        @media (max-width: 760px) {
             .workspace-grid { grid-template-columns: 1fr; }
             .ai-sidebar { position: static; height: auto; min-height: 0; max-height: none; overflow: visible; }
             .suggestion-scroll { min-height: 0; }
@@ -600,11 +597,8 @@ def main_page() -> None:
                         placeholder="e.g. Redact every link and any picture containing a person.",
                     ).props("outlined autogrow clearable maxlength=700").classes("w-full")
                     ui.label(
-                        "Leave blank to scan all privacy categories. Use wording such as ‘Only redact phone numbers’ to restrict the scan to that target."
+                        "Leave blank for a full privacy scan. Use wording such as “Only redact phone numbers” to restrict results to that target."
                     ).classes("muted text-xs -mt-1")
-                    ui.label(
-                        "The selected vision model decides what is sensitive. OCR supplies text and coordinates; regex PII matching is not merged into AI results."
-                    ).classes("security-note")
                     with ui.row().classes("w-full gap-2 flex-wrap"):
                         all_links_button = ui.button(
                             "All links",
@@ -655,75 +649,8 @@ def main_page() -> None:
                         select_all_button = ui.button("Select all", icon="done_all").props("outline dense")
                         clear_selection_button = ui.button("Clear", icon="remove_done").props("outline dense")
                         apply_suggestions_button = ui.button("Apply selected", icon="playlist_add_check").props("color=primary unelevated")
-                    suggestion_summary = ui.label("No AI scan results yet.").classes("muted text-xs")
                     ui.separator()
-
-                    # These suggestion cards are created once and only updated later.
-                    # Earlier builds dynamically deleted and recreated nested NiceGUI
-                    # elements after an async scan. In some browser/client states that
-                    # detached the entire sticky sidebar from the DOM. A stable pool of
-                    # cards avoids clear()/refreshable() lifecycle issues entirely.
-                    suggestion_slots: list[dict[str, object]] = []
-                    with ui.column().classes("suggestion-scroll w-full gap-2") as suggestions_container:
-                        for slot_index in range(MAX_SUGGESTION_CARDS):
-                            with ui.element("div").classes("suggestion-card w-full p-3") as slot_root:
-                                with ui.row().classes("w-full items-start gap-2 no-wrap"):
-                                    slot_checkbox = ui.checkbox(value=False)
-                                    slot_checkbox.on("click", js_handler="event.stopPropagation()")
-                                    with ui.column().classes("grow min-w-0 gap-1"):
-                                        with ui.row().classes("items-center gap-2 flex-wrap"):
-                                            slot_category = ui.badge("Sensitive data")
-                                            slot_confidence = ui.label("0% • Page 1").classes(
-                                                "font-semibold confidence-glow"
-                                            )
-                                            slot_regions = ui.badge("1 region").props(
-                                                "outline color=secondary"
-                                            )
-                                            slot_applied = ui.badge("Applied").props("color=positive")
-                                        slot_confidence_bar = ui.linear_progress(value=0).props(
-                                            "rounded color=primary track-color=blue-grey-10"
-                                        ).classes("w-full")
-                                        slot_preview = ui.label("Sensitive region").classes(
-                                            "text-sm break-all"
-                                        )
-                                        slot_reason = ui.label("").classes("muted text-xs")
-                                        slot_show_page = ui.button(
-                                            "Show page", icon="find_in_page"
-                                        ).props("flat dense").classes("self-start")
-                                        slot_show_page.on(
-                                            "click", js_handler="event.stopPropagation()"
-                                        )
-
-                            slot_root.on(
-                                "click",
-                                lambda _, index=slot_index: toggle_suggestion_slot(index),
-                            )
-                            slot_checkbox.on_value_change(
-                                lambda event, index=slot_index: set_suggestion_slot_selection(
-                                    index, bool(event.value)
-                                )
-                            )
-                            slot_show_page.on_click(
-                                lambda _, index=slot_index: show_suggestion_slot_page(index)
-                            )
-                            slot_root.set_visibility(False)
-                            suggestion_slots.append(
-                                {
-                                    "root": slot_root,
-                                    "checkbox": slot_checkbox,
-                                    "category": slot_category,
-                                    "confidence": slot_confidence,
-                                    "confidence_bar": slot_confidence_bar,
-                                    "regions": slot_regions,
-                                    "applied": slot_applied,
-                                    "preview": slot_preview,
-                                    "reason": slot_reason,
-                                    "show_page": slot_show_page,
-                                }
-                            )
-
-                        suggestion_overflow = ui.label("").classes("muted text-xs p-2")
-                        suggestion_overflow.set_visibility(False)
+                    suggestions_container = ui.column().classes("suggestion-scroll w-full gap-2")
 
         def capture_snapshot(label: str = "Edit") -> HistorySnapshot:
             return HistorySnapshot(
@@ -856,125 +783,66 @@ def main_page() -> None:
                 if suggestion.confidence >= threshold
             ]
 
-        def suggestion_at_slot(slot_index: int) -> SensitiveSuggestion | None:
-            suggestions = visible_suggestions()
-            if 0 <= slot_index < min(len(suggestions), MAX_SUGGESTION_CARDS):
-                return suggestions[slot_index]
-            return None
-
-        def toggle_suggestion_slot(slot_index: int) -> None:
-            suggestion = suggestion_at_slot(slot_index)
-            if suggestion is None or suggestion.applied or state.scan_in_progress:
-                return
-            suggestion.selected = not suggestion.selected
-            render_suggestions()
-            refresh_overlay()
-
-        def set_suggestion_slot_selection(slot_index: int, selected: bool) -> None:
-            suggestion = suggestion_at_slot(slot_index)
-            if suggestion is None or suggestion.applied or state.scan_in_progress:
-                return
-            if suggestion.selected == selected:
-                return
-            suggestion.selected = selected
-            render_suggestions()
-            refresh_overlay()
-
-        async def show_suggestion_slot_page(slot_index: int) -> None:
-            suggestion = suggestion_at_slot(slot_index)
-            if suggestion is None:
-                return
-            await show_page(suggestion.page_index)
-
-        def _set_checkbox_without_callback(checkbox: object, value: bool) -> None:
-            # Server-side assignment updates the Quasar checkbox without emulating a
-            # user event, so the slot callback does not recursively toggle the item.
-            checkbox.value = value
-            checkbox.update()
-
         def render_suggestions() -> None:
-            """Update the pre-created suggestion-card pool in place.
-
-            This deliberately does not call ``clear()`` and does not create or delete
-            NiceGUI elements after the async Fireworks scan. The stable DOM is the same
-            approach used by the older working sidebar, while retaining clickable cards,
-            confidence bars and scrollability.
-            """
+            suggestions_container.clear()
             suggestions = visible_suggestions()
-            total = len(state.ai_suggestions)
-            hidden = max(0, total - len(suggestions))
+            with suggestions_container:
+                if not suggestions:
+                    ui.label("No suggestions at the current confidence threshold.").classes("muted text-sm")
+                    return
 
-            if total == 0:
-                suggestion_summary.set_text("No AI scan results yet.")
-            elif hidden:
-                suggestion_summary.set_text(
-                    f"Showing {len(suggestions)} of {total} suggestion(s); "
-                    f"{hidden} hidden by the confidence threshold."
-                )
-            else:
-                suggestion_summary.set_text(f"Showing all {total} suggestion(s).")
+                for suggestion in suggestions:
+                    card_classes = "suggestion-card w-full p-3"
+                    if suggestion.selected and not suggestion.applied:
+                        card_classes += " suggestion-card-selected"
+                    if suggestion.applied:
+                        card_classes += " suggestion-card-applied"
 
-            for slot_index, slot in enumerate(suggestion_slots):
-                suggestion = suggestions[slot_index] if slot_index < len(suggestions) else None
-                root = slot["root"]
-                if suggestion is None:
-                    root.set_visibility(False)
-                    continue
+                    def toggle_suggestion(item=suggestion) -> None:
+                        if item.applied or state.scan_in_progress:
+                            return
+                        item.selected = not item.selected
+                        render_suggestions()
+                        refresh_overlay()
 
-                root.set_visibility(True)
-                card_classes = "suggestion-card w-full p-3"
-                if suggestion.selected and not suggestion.applied:
-                    card_classes += " suggestion-card-selected"
-                if suggestion.applied:
-                    card_classes += " suggestion-card-applied"
-                root.classes(replace=card_classes)
+                    with ui.card().classes(card_classes).on("click", toggle_suggestion):
+                        with ui.row().classes("w-full items-start gap-2"):
+                            checkbox = ui.checkbox(value=suggestion.selected and not suggestion.applied)
+                            checkbox.set_enabled(not suggestion.applied and not state.scan_in_progress)
+                            checkbox.on("click", js_handler="event.stopPropagation()")
 
-                checkbox = slot["checkbox"]
-                checkbox.set_enabled(not suggestion.applied and not state.scan_in_progress)
-                _set_checkbox_without_callback(
-                    checkbox, suggestion.selected and not suggestion.applied
-                )
+                            def update_selection(event: events.ValueChangeEventArguments, item=suggestion) -> None:
+                                if item.applied or state.scan_in_progress:
+                                    return
+                                item.selected = bool(event.value)
+                                render_suggestions()
+                                refresh_overlay()
 
-                slot["category"].set_text(suggestion.category_label)
-                slot["confidence"].set_text(
-                    f"{suggestion.confidence * 100:.0f}% • Page {suggestion.page_index + 1}"
-                )
-                slot["confidence_bar"].set_value(suggestion.confidence)
-                region_count = len(suggestion.rects)
-                slot["regions"].set_text(
-                    f"{region_count} region" if region_count == 1 else f"{region_count} regions"
-                )
-                slot["regions"].set_visibility(True)
-                slot["applied"].set_visibility(suggestion.applied)
-                slot["preview"].set_text(suggestion.preview or "Sensitive region")
-                slot["reason"].set_text(
-                    f"{suggestion.reason} Source: {suggestion.source}."
-                )
-                slot["show_page"].set_visibility(
-                    suggestion.page_index != state.current_page
-                )
-
-            overflow_count = max(0, len(suggestions) - MAX_SUGGESTION_CARDS)
-            if overflow_count:
-                suggestion_overflow.set_text(
-                    f"{overflow_count} additional suggestion(s) are not shown. "
-                    "Raise the confidence threshold or scan one page at a time."
-                )
-                suggestion_overflow.set_visibility(True)
-            else:
-                suggestion_overflow.set_visibility(False)
-
-            has_selectable = any(
-                not suggestion.applied for suggestion in suggestions[:MAX_SUGGESTION_CARDS]
-            )
-            has_selected = any(
-                suggestion.selected and not suggestion.applied
-                for suggestion in suggestions[:MAX_SUGGESTION_CARDS]
-            )
-            if not state.scan_in_progress:
-                select_all_button.set_enabled(has_selectable)
-                clear_selection_button.set_enabled(has_selectable)
-                apply_suggestions_button.set_enabled(has_selected)
+                            checkbox.on_value_change(update_selection)
+                            with ui.column().classes("grow gap-0"):
+                                with ui.row().classes("items-center gap-2 flex-wrap"):
+                                    ui.badge(suggestion.category_label)
+                                    ui.label(f"{suggestion.confidence * 100:.0f}% • Page {suggestion.page_index + 1}").classes(
+                                        "font-semibold confidence-glow"
+                                    )
+                                    if len(suggestion.rects) > 1:
+                                        ui.badge(f"{len(suggestion.rects)} regions").props("outline color=secondary")
+                                    if suggestion.applied:
+                                        ui.badge("Applied").props("color=positive")
+                                ui.linear_progress(value=suggestion.confidence).props(
+                                    "rounded color=primary track-color=blue-grey-10"
+                                ).classes("w-full")
+                                ui.label(suggestion.preview).classes("text-sm break-all")
+                                ui.label(f"{suggestion.reason} Source: {suggestion.source}.").classes(
+                                    "muted text-xs"
+                                )
+                                if suggestion.page_index != state.current_page:
+                                    show_page_button = ui.button(
+                                        "Show page",
+                                        icon="find_in_page",
+                                        on_click=lambda page=suggestion.page_index: show_page(page),
+                                    ).props("flat dense").classes("self-start")
+                                    show_page_button.on("click", js_handler="event.stopPropagation()")
 
         def threshold_changed(event: events.ValueChangeEventArguments) -> None:
             value = float(event.value or 0.50)
