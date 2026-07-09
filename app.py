@@ -6,7 +6,7 @@ import os
 
 from nicegui import events, run, ui
 
-from ai_service import SensitiveSuggestion, analyze_page
+from ai_service import SensitiveSuggestion, analyze_page, validate_fireworks_connection
 from feedback_store import record_review_metadata
 from pdf_service import (
     CANVAS_HEIGHT,
@@ -79,6 +79,10 @@ class EditorState:
     ai_suggestions: list[SensitiveSuggestion] = field(default_factory=list)
     undo_stack: list[HistorySnapshot] = field(default_factory=list)
     redo_stack: list[HistorySnapshot] = field(default_factory=list)
+    fireworks_connected: bool = False
+    connected_api_key: str | None = None
+    connected_model: str | None = None
+    scan_in_progress: bool = False
 
 
 @ui.page("/")
@@ -155,18 +159,41 @@ def main_page() -> None:
             box-shadow: 0 14px 40px rgba(0,0,0,.18);
         }
         .ai-sidebar {
-            position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow: hidden;
+            position: sticky; top: 1rem; height: calc(100vh - 2rem); min-height: 620px;
+            overflow-y: auto; overflow-x: hidden;
             border: 1px solid rgba(94,234,212,.26);
             box-shadow: 0 25px 80px rgba(0,0,0,.32), 0 0 45px rgba(94,234,212,.055);
+            scrollbar-color: rgba(94,234,212,.48) rgba(3,17,24,.35);
+            scrollbar-width: thin;
         }
+        .ai-sidebar::-webkit-scrollbar { width: 9px; }
+        .ai-sidebar::-webkit-scrollbar-track { background: rgba(3,17,24,.35); border-radius: 10px; }
+        .ai-sidebar::-webkit-scrollbar-thumb { background: linear-gradient(#5eead4, #7dd3fc); border-radius: 10px; }
         .ai-sidebar::before {
             content: ""; display: block; height: 3px; margin: -16px -16px 12px;
             background: linear-gradient(90deg, #5eead4, #7dd3fc, #a78bfa);
         }
         .suggestion-scroll {
-            max-height: calc(100vh - 640px); min-height: 175px; overflow-y: auto;
-            padding-right: .3rem; scrollbar-color: rgba(94,234,212,.45) transparent;
+            min-height: 190px; overflow: visible; padding-right: .15rem;
         }
+        .sidebar-section {
+            border: 1px solid rgba(125,211,252,.14); border-radius: 18px;
+            background: linear-gradient(135deg, rgba(4,22,29,.72), rgba(8,28,38,.48));
+            padding: .9rem;
+        }
+        .connection-card {
+            border-color: rgba(94,234,212,.30);
+            box-shadow: 0 18px 55px rgba(0,0,0,.20), 0 0 35px rgba(94,234,212,.045);
+        }
+        .connection-status {
+            border: 1px solid rgba(125,211,252,.18); border-radius: 12px;
+            padding: .5rem .7rem; background: rgba(3,17,24,.55); line-height: 1.35;
+        }
+        .progress-shell {
+            border: 1px solid rgba(94,234,212,.16); border-radius: 14px;
+            padding: .65rem; background: rgba(3,17,24,.48);
+        }
+        .scan-status { white-space: normal; overflow-wrap: anywhere; line-height: 1.45; }
         .suggestion-card { background: rgba(7,24,32,.88); border-radius: 16px; border: 1px solid rgba(125,211,252,.13); }
         .editor-image {
             width: min(100%, 980px); border-radius: 18px; overflow: hidden;
@@ -206,8 +233,8 @@ def main_page() -> None:
         }
         @media (max-width: 1180px) {
             .workspace-grid { grid-template-columns: 1fr; }
-            .ai-sidebar { position: static; max-height: none; }
-            .suggestion-scroll { max-height: 520px; }
+            .ai-sidebar { position: static; height: auto; min-height: 0; max-height: none; overflow: visible; }
+            .suggestion-scroll { min-height: 0; }
         }
         @media (max-width: 700px) {
             .hero { padding: 1.1rem; border-radius: 20px; }
@@ -229,12 +256,167 @@ def main_page() -> None:
                     ui.badge("LOCAL REVIEW").props("outline color=positive")
                     ui.icon("verified_user", size="32px").classes("text-teal-300")
 
+        with ui.card().classes("glass-card connection-card w-full p-5"):
+            with ui.row().classes("w-full items-start justify-between gap-4 flex-wrap"):
+                with ui.column().classes("gap-1 max-w-2xl"):
+                    ui.label("01 // FIREWORKS ACCESS").classes("section-kicker")
+                    ui.label("Connect your AI provider").classes("text-xl font-bold")
+                    ui.label(
+                        "Aurora stays locked until a Fireworks API key is entered and successfully validated against the selected model."
+                    ).classes("muted text-sm")
+                connection_status_icon = ui.icon("vpn_key", size="28px").classes("text-slate-400")
+
+            with ui.row().classes("w-full items-start gap-4 flex-wrap"):
+                with ui.column().classes("credential-panel flex-1 min-w-[300px] gap-2"):
+                    ui.label("API CREDENTIAL").classes("section-kicker")
+                    fireworks_api_key = ui.input(
+                        label="Fireworks API key",
+                        placeholder="fw_…",
+                        password=True,
+                        password_toggle_button=True,
+                    ).props("outlined autocomplete=new-password spellcheck=false").classes("w-full")
+                    ui.label(
+                        "The key is held only in this page session and is never written to disk. A small validation request is sent when you press Connect."
+                    ).classes("security-note")
+
+                with ui.column().classes("model-panel flex-1 min-w-[320px] gap-2"):
+                    ui.label("VISION MODEL").classes("section-kicker")
+                    vision_model_select = ui.select(
+                        options={
+                            model_id: details["label"]
+                            for model_id, details in FIREWORKS_MODEL_CATALOG.items()
+                        },
+                        value=DEFAULT_UI_FIREWORKS_MODEL,
+                        label="Fireworks model",
+                    ).props("outlined options-dense").classes("w-full")
+                    selected_model_strength = ui.label().classes("model-strength")
+                    selected_model_description = ui.label().classes("muted text-xs")
+                    selected_model_billing = ui.label().classes("text-xs text-cyan-200")
+                    ui.label(
+                        "Images are billed as input tokens. Rates are indicative and may change."
+                    ).classes("muted text-xs")
+
+            with ui.row().classes("w-full items-center gap-3 flex-wrap"):
+                connect_button = ui.button("Connect API key", icon="link").props("color=primary unelevated")
+                connection_spinner = ui.spinner(size="22px").classes("text-teal-300")
+                connection_spinner.visible = False
+                connection_status = ui.label(
+                    "Not connected — enter a key, choose a model and press Connect."
+                ).classes("connection-status muted text-sm flex-1")
+
+            def update_selected_model_details(*_: object) -> None:
+                details = FIREWORKS_MODEL_CATALOG.get(
+                    str(vision_model_select.value),
+                    FIREWORKS_MODEL_CATALOG[DEFAULT_UI_FIREWORKS_MODEL],
+                )
+                selected_model_strength.set_text(f"TASK STRENGTH // {details['strength']}")
+                selected_model_description.set_text(details["description"])
+                selected_model_billing.set_text(details["billing"])
+
+            def invalidate_fireworks_connection(*_: object) -> None:
+                if state.scan_in_progress:
+                    return
+                state.fireworks_connected = False
+                state.connected_api_key = None
+                state.connected_model = None
+                connection_status.set_text(
+                    "Connection not validated — press Connect after changing the key or model."
+                )
+                connection_status.classes(replace="connection-status text-sm text-amber-300 flex-1")
+                connection_status_icon.classes(replace="text-amber-300")
+                try:
+                    uploader.disable()
+                    analyze_button.disable()
+                    editor_controls.visible = False
+                    workspace.visible = False
+                except NameError:
+                    pass
+
+            async def connect_fireworks() -> None:
+                if state.scan_in_progress:
+                    return
+                api_key = str(fireworks_api_key.value or "").strip()
+                model = str(vision_model_select.value or DEFAULT_UI_FIREWORKS_MODEL).strip()
+                if not api_key:
+                    invalidate_fireworks_connection()
+                    connection_status.set_text("Invalid API key — enter a Fireworks key before connecting.")
+                    connection_status.classes(replace="connection-status text-sm text-rose-300 flex-1")
+                    connection_status_icon.classes(replace="text-rose-300")
+                    ui.notify("Enter a Fireworks API key first.", type="warning")
+                    return
+                if model not in FIREWORKS_MODEL_CATALOG:
+                    model = DEFAULT_UI_FIREWORKS_MODEL
+                    vision_model_select.set_value(model)
+
+                fireworks_api_key.disable()
+                vision_model_select.disable()
+                connect_button.disable()
+                connection_spinner.visible = True
+                connection_status.set_text("Validating the key and selected model with Fireworks…")
+                connection_status.classes(replace="connection-status text-sm text-cyan-200 flex-1")
+                connection_status_icon.classes(replace="text-cyan-300")
+                try:
+                    valid, message = await run.io_bound(
+                        validate_fireworks_connection, api_key=api_key, model=model
+                    )
+                    if valid:
+                        state.fireworks_connected = True
+                        state.connected_api_key = api_key
+                        state.connected_model = model
+                        connection_status.set_text(message)
+                        connection_status.classes(replace="connection-status text-sm text-emerald-300 flex-1")
+                        connection_status_icon.classes(replace="text-emerald-300")
+                        uploader.enable()
+                        analyze_button.enable()
+                        if state.file_bytes is not None:
+                            editor_controls.visible = True
+                            workspace.visible = True
+                        ui.notify("API key connected successfully.", type="positive")
+                    else:
+                        state.fireworks_connected = False
+                        state.connected_api_key = None
+                        state.connected_model = None
+                        connection_status.set_text(message)
+                        connection_status.classes(replace="connection-status text-sm text-rose-300 flex-1")
+                        connection_status_icon.classes(replace="text-rose-300")
+                        uploader.disable()
+                        analyze_button.disable()
+                        editor_controls.visible = False
+                        workspace.visible = False
+                        ui.notify("Invalid API key or unavailable model.", type="negative")
+                except Exception as exc:
+                    state.fireworks_connected = False
+                    state.connected_api_key = None
+                    state.connected_model = None
+                    connection_status.set_text(f"Connection check failed: {exc}")
+                    connection_status.classes(replace="connection-status text-sm text-rose-300 flex-1")
+                    connection_status_icon.classes(replace="text-rose-300")
+                    uploader.disable()
+                    analyze_button.disable()
+                    editor_controls.visible = False
+                    workspace.visible = False
+                    ui.notify("Could not validate the Fireworks connection.", type="negative")
+                finally:
+                    connection_spinner.visible = False
+                    fireworks_api_key.enable()
+                    vision_model_select.enable()
+                    connect_button.enable()
+
+            update_selected_model_details()
+            vision_model_select.on_value_change(update_selected_model_details)
+            vision_model_select.on_value_change(invalidate_fireworks_connection)
+            fireworks_api_key.on_value_change(invalidate_fireworks_connection)
+            connect_button.on_click(connect_fireworks)
+
         with ui.card().classes("glass-card w-full p-5"):
-            ui.label("01 // INPUT").classes("section-kicker")
+            ui.label("02 // INPUT").classes("section-kicker")
             ui.label("Upload a document").classes("text-xl font-bold")
             upload_status = ui.label("No file uploaded.").classes("muted")
 
             async def handle_upload(event: events.UploadEventArguments) -> None:
+                if not state.fireworks_connected:
+                    ui.notify("Connect a valid Fireworks API key before uploading a document.", type="warning")
+                    return
                 try:
                     if event.file.size() > MAX_UPLOAD_BYTES:
                         raise PdfError("The file is larger than the 50 MB starter limit.")
@@ -293,7 +475,7 @@ def main_page() -> None:
                     type="positive",
                 )
 
-            ui.upload(
+            uploader = ui.upload(
                 label="Choose PDF or image",
                 on_upload=handle_upload,
                 auto_upload=True,
@@ -301,6 +483,8 @@ def main_page() -> None:
             ).props('accept="application/pdf,.pdf,image/jpeg,.jpg,.jpeg,image/png,.png,image/webp,.webp,image/bmp,.bmp"').classes(
                 "w-full"
             )
+            uploader.disable()
+            ui.label("Connect a valid Fireworks API key above to unlock uploads and AI redaction.").classes("muted text-xs")
 
         editor_controls = ui.row().classes("toolbar w-full items-center gap-2 flex-wrap")
         editor_controls.visible = False
@@ -327,7 +511,7 @@ def main_page() -> None:
         with workspace:
             with ui.column().classes("editor-column w-full gap-4"):
                 with ui.card().classes("glass-card w-full p-5"):
-                    ui.label("02 // EDITOR").classes("section-kicker")
+                    ui.label("03 // EDITOR").classes("section-kicker")
                     ui.label("Mark redactions").classes("text-xl font-bold")
                     mode_help = ui.label(
                         "Draw boxes: click and drag over any area you want to remove."
@@ -340,7 +524,7 @@ def main_page() -> None:
                     ).classes("editor-image")
 
                 with ui.card().classes("glass-card w-full p-5"):
-                    ui.label("04 // EXPORT").classes("section-kicker")
+                    ui.label("05 // EXPORT").classes("section-kicker")
                     ui.label("Final preview").classes("text-xl font-bold")
                     scrub_checkbox = ui.checkbox(
                         "Remove metadata, hidden text, attachments and JavaScript",
@@ -359,100 +543,86 @@ def main_page() -> None:
                     download_button = ui.button("Download redacted file", icon="download").props("color=positive")
                     download_button.disable()
 
-            with ui.card().classes("ai-sidebar w-full p-4"):
+            with ui.card().classes("ai-sidebar w-full p-4 gap-3"):
                 with ui.row().classes("w-full items-center justify-between gap-2"):
                     with ui.column().classes("gap-0"):
-                        ui.label("03 // AI REVIEW").classes("section-kicker")
+                        ui.label("04 // AI REVIEW").classes("section-kicker")
                         ui.label("AI redaction sidebar").classes("text-xl font-bold")
-                        ui.label("Review likely sensitive content while marking the page.").classes("muted text-sm")
+                        ui.label("Configure the scan, then review every proposed redaction.").classes("muted text-sm")
                     ui.icon("shield", size="md").classes("text-teal-300")
 
-                ui.label(
-                    "Suggestions are only overlays until you tick them and press Apply selected. Names and addresses are now checked by both contextual rules and the vision model."
-                ).classes("muted text-xs")
-
-                with ui.column().classes("credential-panel w-full gap-1"):
-                    ui.label("FIREWORKS CONNECTION").classes("section-kicker")
-                    fireworks_api_key = ui.input(
-                        label="Fireworks API key",
-                        placeholder="fw_…",
-                        password=True,
-                        password_toggle_button=True,
-                    ).props("outlined dense autocomplete=new-password spellcheck=false").classes("w-full")
+                with ui.column().classes("sidebar-section w-full gap-2"):
+                    ui.label("SCAN SETTINGS").classes("section-kicker")
+                    with ui.row().classes("w-full items-center gap-3 flex-wrap"):
+                        analysis_scope = ui.select(
+                            options={"all": "All pages", "current": "Current page"},
+                            value="all",
+                            label="Scan scope",
+                        ).props("outlined dense").classes("w-40")
+                        run_ocr_checkbox = ui.checkbox("Use OCR", value=True)
                     ui.label(
-                        "Session-only: Aurora does not write the entered key to disk. It remains in this browser input and the current page session until cleared or closed. "
-                        "Leave it blank to use FIREWORKS_API_KEY from .env."
-                    ).classes("security-note")
+                        "OCR reads text from scanned PDFs and images so sensitive information can be detected and suggested for redaction."
+                    ).classes("muted text-xs -mt-1")
 
-                with ui.column().classes("model-panel w-full gap-1"):
-                    ui.label("VISION MODEL").classes("section-kicker")
-                    vision_model_select = ui.select(
-                        options={
-                            model_id: details["label"]
-                            for model_id, details in FIREWORKS_MODEL_CATALOG.items()
-                        },
-                        value=DEFAULT_UI_FIREWORKS_MODEL,
-                        label="Fireworks model",
-                    ).props("outlined dense options-dense").classes("w-full")
-                    selected_model_strength = ui.label().classes("model-strength")
-                    selected_model_description = ui.label().classes("muted text-xs")
-                    selected_model_billing = ui.label().classes("text-xs text-cyan-200")
+                    custom_instruction = ui.textarea(
+                        label="Custom redaction instruction",
+                        placeholder="e.g. Redact every link and any picture containing a person.",
+                    ).props("outlined autogrow clearable maxlength=700").classes("w-full")
                     ui.label(
-                        "Images are billed as input tokens. Prices are indicative Fireworks serverless rates checked in July 2026 and may change."
+                        "Describe extra text or visual targets. Standard privacy checks still run alongside your instruction."
+                    ).classes("muted text-xs -mt-1")
+                    with ui.row().classes("w-full gap-2 flex-wrap"):
+                        all_links_button = ui.button(
+                            "All links",
+                            on_click=lambda: custom_instruction.set_value("Redact every visible web link or URL."),
+                            icon="link",
+                        ).props("flat dense")
+                        faces_button = ui.button(
+                            "Faces / photos",
+                            on_click=lambda: custom_instruction.set_value("Redact all faces, portraits and pictures containing people."),
+                            icon="face",
+                        ).props("flat dense")
+                        signatures_button = ui.button(
+                            "Signatures",
+                            on_click=lambda: custom_instruction.set_value("Redact every handwritten or digital signature."),
+                            icon="draw",
+                        ).props("flat dense")
+
+                    learn_from_review = ui.checkbox("Use my approvals to calibrate future confidence", value=False)
+                    ui.label(
+                        "Stores category-level accept/reject metadata only — never document text, images, coordinates or secret values."
+                    ).classes("muted text-xs -mt-1")
+
+                    threshold_label = ui.label("Show suggestions at 60% confidence or higher").classes("muted text-sm")
+                    confidence_threshold = ui.slider(min=0.5, max=0.99, step=0.01, value=0.60).classes("w-full")
+                    analyze_button = ui.button("Run AI privacy scan", icon="auto_awesome").props("color=primary unelevated").classes("w-full")
+                    analyze_button.disable()
+
+                    with ui.column().classes("progress-shell w-full gap-2") as scan_progress_shell:
+                        with ui.row().classes("w-full items-center justify-between gap-2"):
+                            progress_label = ui.label("Waiting for a validated API connection.").classes("muted text-xs")
+                            progress_percentage = ui.label("0%").classes("text-xs text-cyan-200")
+                        scan_progress = ui.linear_progress(value=0).props("rounded color=primary track-color=blue-grey-10").classes("w-full")
+                    scan_progress_shell.visible = False
+                    analysis_status = ui.label(
+                        "Connect a Fireworks API key, upload a file, then run the scan."
+                    ).classes("scan-status muted text-sm")
+
+                with ui.column().classes("sidebar-section w-full gap-2"):
+                    with ui.row().classes("w-full items-center justify-between gap-2 flex-wrap"):
+                        with ui.column().classes("gap-0"):
+                            ui.label("SUGGESTIONS").classes("section-kicker")
+                            ui.label("Review and apply").classes("font-semibold")
+                        ui.badge("HUMAN APPROVAL REQUIRED").props("outline color=positive")
+                    ui.label(
+                        "Suggestions remain temporary overlays until selected and applied."
                     ).classes("muted text-xs")
-
-                    def update_selected_model_details(*_: object) -> None:
-                        details = FIREWORKS_MODEL_CATALOG.get(
-                            str(vision_model_select.value),
-                            FIREWORKS_MODEL_CATALOG[DEFAULT_UI_FIREWORKS_MODEL],
-                        )
-                        selected_model_strength.set_text(f"TASK STRENGTH // {details['strength']}")
-                        selected_model_description.set_text(details["description"])
-                        selected_model_billing.set_text(details["billing"])
-
-                    vision_model_select.on_value_change(update_selected_model_details)
-                    update_selected_model_details()
-
-                with ui.row().classes("w-full items-center gap-3 flex-wrap"):
-                    analysis_scope = ui.select(
-                        options={"all": "All pages", "current": "Current page"},
-                        value="all",
-                        label="Scan scope",
-                    ).props("outlined dense").classes("w-40")
-                    run_ocr_checkbox = ui.checkbox("Use OCR", value=True)
-                ui.label(
-                    "OCR reads text from scanned PDFs and images so sensitive information can be detected and suggested for redaction."
-                ).classes("muted text-xs -mt-2")
-
-                custom_instruction = ui.textarea(
-                    label="Custom redaction instruction",
-                    placeholder="e.g. Redact every link and any picture containing a person.",
-                ).props("outlined autogrow clearable maxlength=700").classes("w-full")
-                ui.label(
-                    "Describe extra text or visual targets. Standard privacy checks still run alongside your instruction."
-                ).classes("muted text-xs -mt-2")
-                with ui.row().classes("w-full gap-2 flex-wrap"):
-                    ui.button("All links", on_click=lambda: custom_instruction.set_value("Redact every visible web link or URL."), icon="link").props("flat dense")
-                    ui.button("Faces / photos", on_click=lambda: custom_instruction.set_value("Redact all faces, portraits and pictures containing people."), icon="face").props("flat dense")
-                    ui.button("Signatures", on_click=lambda: custom_instruction.set_value("Redact every handwritten or digital signature."), icon="draw").props("flat dense")
-
-                learn_from_review = ui.checkbox("Use my approvals to calibrate future confidence", value=False)
-                ui.label(
-                    "Stores category-level accept/reject metadata only — never document text, images, coordinates or secret values."
-                ).classes("muted text-xs -mt-2")
-
-                threshold_label = ui.label("Show suggestions at 60% confidence or higher").classes("muted text-sm")
-                confidence_threshold = ui.slider(min=0.5, max=0.99, step=0.01, value=0.60).classes("w-full")
-                analyze_button = ui.button("Run AI privacy scan", icon="auto_awesome").props("color=primary unelevated").classes("w-full")
-                analysis_status = ui.label("Upload a file, then run the scan.").classes("muted text-sm")
-
-                with ui.row().classes("w-full gap-2 flex-wrap"):
-                    select_all_button = ui.button("Select all", icon="done_all").props("outline dense")
-                    clear_selection_button = ui.button("Clear", icon="remove_done").props("outline dense")
-                    apply_suggestions_button = ui.button("Apply selected", icon="playlist_add_check").props("color=primary unelevated")
-
-                ui.separator()
-                suggestions_container = ui.column().classes("suggestion-scroll w-full gap-2")
+                    with ui.row().classes("w-full gap-2 flex-wrap"):
+                        select_all_button = ui.button("Select all", icon="done_all").props("outline dense")
+                        clear_selection_button = ui.button("Clear", icon="remove_done").props("outline dense")
+                        apply_suggestions_button = ui.button("Apply selected", icon="playlist_add_check").props("color=primary unelevated")
+                    ui.separator()
+                    suggestions_container = ui.column().classes("suggestion-scroll w-full gap-2")
 
         def capture_snapshot(label: str = "Edit") -> HistorySnapshot:
             return HistorySnapshot(
@@ -869,42 +1039,98 @@ def main_page() -> None:
         clear_button.on_click(clear_page_redactions)
         update_history_buttons()
 
+        def set_scan_progress(value: float, text: str) -> None:
+            value = max(0.0, min(float(value), 1.0))
+            scan_progress.set_value(value)
+            progress_percentage.set_text(f"{round(value * 100):d}%")
+            progress_label.set_text(text)
+
+        def set_scan_controls_locked(locked: bool) -> None:
+            state.scan_in_progress = locked
+            controls = [
+                fireworks_api_key,
+                vision_model_select,
+                connect_button,
+                analysis_scope,
+                run_ocr_checkbox,
+                custom_instruction,
+                all_links_button,
+                faces_button,
+                signatures_button,
+                learn_from_review,
+                confidence_threshold,
+            ]
+            for control in controls:
+                control.disable() if locked else control.enable()
+
+            if locked:
+                uploader.disable()
+                analyze_button.disable()
+                apply_suggestions_button.disable()
+                select_all_button.disable()
+                clear_selection_button.disable()
+            else:
+                if state.fireworks_connected:
+                    uploader.enable()
+                    analyze_button.enable()
+                else:
+                    uploader.disable()
+                    analyze_button.disable()
+                apply_suggestions_button.enable()
+                select_all_button.enable()
+                clear_selection_button.enable()
+
         async def scan_for_sensitive_information() -> None:
+            if state.scan_in_progress:
+                return
+            if not state.fireworks_connected or not state.connected_api_key or not state.connected_model:
+                ui.notify("Connect and validate a Fireworks API key before running a scan.", type="warning")
+                return
             if state.file_bytes is None or state.kind is None:
                 ui.notify("Upload a PDF or image first.", type="warning")
                 return
 
             entered_api_key = str(fireworks_api_key.value or "").strip()
             selected_model = str(vision_model_select.value or DEFAULT_UI_FIREWORKS_MODEL).strip()
-            if selected_model not in FIREWORKS_MODEL_CATALOG:
-                selected_model = DEFAULT_UI_FIREWORKS_MODEL
-            if not entered_api_key and not os.getenv("FIREWORKS_API_KEY", "").strip():
-                ui.notify(
-                    "No Fireworks API key was supplied. The scan will use local OCR, pattern and QR detectors only.",
-                    type="warning",
-                    timeout=9000,
-                )
+            if (
+                entered_api_key != state.connected_api_key
+                or selected_model != state.connected_model
+            ):
+                invalidate_fireworks_connection()
+                ui.notify("The API key or model changed. Press Connect again before scanning.", type="warning")
+                return
 
             if analysis_scope.value == "current":
                 page_indexes = [state.current_page]
-                state.ai_suggestions = [
-                    suggestion for suggestion in state.ai_suggestions if suggestion.page_index != state.current_page
+                retained_suggestions = [
+                    suggestion
+                    for suggestion in state.ai_suggestions
+                    if suggestion.page_index != state.current_page
                 ]
             else:
                 page_indexes = list(range(state.page_count))
-                state.ai_suggestions.clear()
+                retained_suggestions = []
 
-            analyze_button.disable()
-            apply_suggestions_button.disable()
+            previous_suggestions = state.ai_suggestions
+            scanned_suggestions: list[SensitiveSuggestion] = []
             warnings: list[str] = []
             total_tokens = 0
-            ai_was_used = False
+            total_pages = max(len(page_indexes), 1)
+
+            set_scan_controls_locked(True)
+            scan_progress_shell.visible = True
+            set_scan_progress(0.0, "Preparing the scan…")
+            analysis_status.set_text("AI scan in progress. Connection and model settings are locked.")
 
             try:
                 for position, page_index in enumerate(page_indexes, start=1):
-                    analysis_status.set_text(
-                        f"Scanning page {page_index + 1} ({position}/{len(page_indexes)})…"
+                    page_start = (position - 1) / total_pages
+                    page_span = 1 / total_pages
+                    set_scan_progress(
+                        page_start + page_span * 0.08,
+                        f"Rendering page {page_index + 1} ({position}/{total_pages})…",
                     )
+
                     if state.kind == "pdf":
                         image, view = await run.io_bound(render_page, state.file_bytes, page_index)
                         words = state.words_by_page.get(page_index)
@@ -915,6 +1141,10 @@ def main_page() -> None:
                         image, view = await run.io_bound(render_image, state.file_bytes)
                         words = []
 
+                    set_scan_progress(
+                        page_start + page_span * 0.25,
+                        f"Running OCR, local detectors and Fireworks vision on page {page_index + 1}…",
+                    )
                     result = await run.io_bound(
                         analyze_page,
                         page_index=page_index,
@@ -924,37 +1154,45 @@ def main_page() -> None:
                         use_ai=True,
                         run_ocr=bool(run_ocr_checkbox.value),
                         custom_instruction=str(custom_instruction.value or "").strip(),
-                        fireworks_api_key=entered_api_key or None,
-                        fireworks_model=selected_model,
+                        fireworks_api_key=state.connected_api_key,
+                        fireworks_model=state.connected_model,
                     )
-                    state.ai_suggestions.extend(result.suggestions)
+                    if not result.ai_used:
+                        raise RuntimeError(
+                            "Fireworks vision did not complete, so no local-only scan was accepted."
+                        )
+                    scanned_suggestions.extend(result.suggestions)
                     warnings.extend(result.warnings)
                     total_tokens += result.token_count
-                    ai_was_used = ai_was_used or result.ai_used
-                    render_suggestions()
-                    refresh_overlay()
+                    set_scan_progress(
+                        position / total_pages,
+                        f"Completed page {page_index + 1} ({position}/{total_pages}).",
+                    )
 
+                state.ai_suggestions = retained_suggestions + scanned_suggestions
+                render_suggestions()
+                refresh_overlay()
                 visible_count = len(visible_suggestions())
+                model_label = FIREWORKS_MODEL_CATALOG[state.connected_model]["label"].split(" — ", 1)[0]
                 status = (
-                    f"Found {len(state.ai_suggestions)} suggestion(s); {visible_count} meet the current threshold. "
-                    f"Analysed {total_tokens} text token(s)."
+                    f"Found {len(scanned_suggestions)} new suggestion(s); {visible_count} meet the current threshold. "
+                    f"Analysed {total_tokens} text token(s) using {model_label}."
                 )
-                if not ai_was_used:
-                    status += " The Fireworks vision model did not run; local detectors may still have produced suggestions."
-                else:
-                    model_label = FIREWORKS_MODEL_CATALOG[selected_model]["label"].split(" — ", 1)[0]
-                    status += f" Vision analysis used {model_label}."
                 analysis_status.set_text(status)
+                set_scan_progress(1.0, "Scan complete — review the suggestions below.")
                 if warnings:
                     ui.notify(warnings[0], type="warning", timeout=10000)
                 else:
                     ui.notify("Sensitive-information scan complete.", type="positive")
             except Exception as exc:
-                analysis_status.set_text("The scan could not be completed.")
-                ui.notify(f"AI scan failed: {exc}", type="negative")
+                state.ai_suggestions = previous_suggestions
+                render_suggestions()
+                refresh_overlay()
+                analysis_status.set_text("The scan failed. No partial scan results were applied.")
+                set_scan_progress(0.0, "Scan failed — check the connection message and try again.")
+                ui.notify(f"AI scan failed: {exc}", type="negative", timeout=12000)
             finally:
-                analyze_button.enable()
-                apply_suggestions_button.enable()
+                set_scan_controls_locked(False)
 
         analyze_button.on_click(scan_for_sensitive_information)
 

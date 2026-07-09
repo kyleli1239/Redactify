@@ -31,6 +31,57 @@ Rect = tuple[float, float, float, float]
 FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
 DEFAULT_FIREWORKS_MODEL = "accounts/fireworks/models/minimax-m3"
 
+
+def _safe_api_error(exc: Exception, api_key: str) -> str:
+    """Return a user-safe SDK error without reflecting the supplied secret."""
+
+    message = str(exc)
+    return message.replace(api_key, "[REDACTED_API_KEY]") if api_key else message
+
+
+def validate_fireworks_connection(*, api_key: str, model: str) -> tuple[bool, str]:
+    """Validate both the supplied Fireworks key and access to the selected model.
+
+    The check sends a deliberately tiny chat-completion request. It confirms that
+    authentication succeeds and that the selected model can be queried by this key.
+    """
+
+    api_key = api_key.strip()
+    model = model.strip()
+    if not api_key:
+        return False, "Invalid API key — no key was entered."
+    if not model:
+        return False, "Select a Fireworks model before connecting."
+
+    client = OpenAI(api_key=api_key, base_url=FIREWORKS_BASE_URL)
+    try:
+        client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Connection check. Reply with OK.",
+                }
+            ],
+            temperature=0,
+            max_tokens=2,
+            timeout=25,
+        )
+        model_name = model.rsplit("/", 1)[-1]
+        return True, f"API key connected successfully — {model_name} is ready."
+    except Exception as exc:
+        status_code = getattr(exc, "status_code", None)
+        safe_message = _safe_api_error(exc, api_key)
+        if status_code in {401, 403}:
+            return False, "Invalid API key — Fireworks rejected the credentials."
+        if status_code == 404:
+            return False, "The key was received, but the selected model is unavailable to this account."
+        if status_code == 429:
+            return False, "Fireworks rate-limited the connection check. Wait briefly, then press Connect again."
+        if status_code is not None:
+            return False, f"Fireworks connection failed with HTTP {status_code}: {safe_message}"
+        return False, f"Could not reach Fireworks: {safe_message}"
+
 CATEGORY_LABELS: dict[str, str] = {
     "email_address": "Email address",
     "phone_number": "Phone number",
@@ -1155,9 +1206,9 @@ def _call_fireworks_vision(
     api_key_override: str | None = None,
     model_override: str | None = None,
 ) -> tuple[list[SensitiveSuggestion], list[str], bool]:
-    api_key = (api_key_override or os.getenv("FIREWORKS_API_KEY", "")).strip()
+    api_key = (api_key_override or "").strip()
     if not api_key:
-        return [], ["FIREWORKS_API_KEY is not configured, so only local pattern, OCR and QR detectors were used."], False
+        raise ValueError("A validated Fireworks API key is required for AI scanning.")
 
     model = (
         (model_override or "").strip()
@@ -1168,9 +1219,7 @@ def _call_fireworks_vision(
     client = OpenAI(api_key=api_key, base_url=FIREWORKS_BASE_URL)
 
     def safe_error(exc: Exception) -> str:
-        # Avoid reflecting a user-supplied secret into the UI if an SDK error ever includes it.
-        message = str(exc)
-        return message.replace(api_key, "[REDACTED_API_KEY]") if api_key else message
+        return _safe_api_error(exc, api_key)
     token_lookup = {token.token_id: token for token in tokens}
     page_image = _document_crop(image, view)
     data_url = _image_data_url(page_image)
@@ -1424,6 +1473,9 @@ def analyze_page(
         )
         suggestions.extend(ai_findings)
         warnings.extend(ai_warnings)
+        if not ai_used:
+            detail = ai_warnings[0] if ai_warnings else "The Fireworks vision request did not complete."
+            raise RuntimeError(detail)
 
     # Chat findings are expanded into one panel-like region so the review box can cover a full bubble/message area.
     for suggestion in suggestions:
