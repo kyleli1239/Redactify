@@ -176,14 +176,8 @@ def main_page() -> None:
             background: linear-gradient(90deg, #5eead4, #7dd3fc, #a78bfa);
         }
         .suggestion-scroll {
-            min-height: 190px; max-height: 460px; width: 100%;
-            overflow-y: auto; overflow-x: hidden; padding-right: .35rem;
-            scrollbar-color: rgba(94,234,212,.48) rgba(3,17,24,.35);
-            scrollbar-width: thin;
+            min-height: 190px; overflow: visible; padding-right: .15rem;
         }
-        .suggestion-scroll::-webkit-scrollbar { width: 7px; }
-        .suggestion-scroll::-webkit-scrollbar-track { background: rgba(3,17,24,.35); border-radius: 10px; }
-        .suggestion-scroll::-webkit-scrollbar-thumb { background: linear-gradient(#5eead4, #7dd3fc); border-radius: 10px; }
         .sidebar-section {
             border: 1px solid rgba(125,211,252,.14); border-radius: 18px;
             background: linear-gradient(135deg, rgba(4,22,29,.72), rgba(8,28,38,.48));
@@ -825,13 +819,8 @@ def main_page() -> None:
                                     ui.label(f"{suggestion.confidence * 100:.0f}% • Page {suggestion.page_index + 1}").classes(
                                         "font-semibold confidence-glow"
                                     )
-                                    if len(suggestion.rects) > 1:
-                                        ui.badge(f"{len(suggestion.rects)} regions").props("outline color=secondary")
                                     if suggestion.applied:
                                         ui.badge("Applied").props("color=positive")
-                                ui.linear_progress(value=suggestion.confidence).props(
-                                    "rounded color=primary track-color=blue-grey-10"
-                                ).classes("w-full")
                                 ui.label(suggestion.preview).classes("text-sm break-all")
                                 ui.label(f"{suggestion.reason} Source: {suggestion.source}.").classes(
                                     "muted text-xs"
@@ -1192,36 +1181,21 @@ def main_page() -> None:
 
                     set_scan_progress(
                         page_start + page_span * 0.25,
-                        f"Running OCR and Fireworks vision on page {page_index + 1}…",
+                        f"Running OCR, local detectors and Fireworks vision on page {page_index + 1}…",
                     )
-                    analysis_task = asyncio.create_task(
-                        run.io_bound(
-                            analyze_page,
-                            page_index=page_index,
-                            image=image,
-                            view=view,
-                            embedded_words=words,
-                            use_ai=True,
-                            run_ocr=bool(run_ocr_checkbox.value),
-                            custom_instruction=str(custom_instruction.value or "").strip(),
-                            fireworks_api_key=state.connected_api_key,
-                            fireworks_model=state.connected_model,
-                            use_local_calibration=bool(learn_from_review.value),
-                        )
+                    result = await run.io_bound(
+                        analyze_page,
+                        page_index=page_index,
+                        image=image,
+                        view=view,
+                        embedded_words=words,
+                        use_ai=True,
+                        run_ocr=bool(run_ocr_checkbox.value),
+                        custom_instruction=str(custom_instruction.value or "").strip(),
+                        fireworks_api_key=state.connected_api_key,
+                        fireworks_model=state.connected_model,
+                        use_local_calibration=bool(learn_from_review.value),
                     )
-                    wait_started = time.monotonic()
-                    model_short_name = state.connected_model.rsplit("/", 1)[-1]
-                    while not analysis_task.done():
-                        await asyncio.sleep(0.75)
-                        elapsed = time.monotonic() - wait_started
-                        # Fireworks does not expose page-analysis percentage. This heartbeat
-                        # confirms the request is alive without falsely claiming completion.
-                        heartbeat = min(0.88, 0.25 + elapsed / 180.0 * 0.63)
-                        set_scan_progress(
-                            page_start + page_span * heartbeat,
-                            f"Waiting for {model_short_name} on page {page_index + 1}… {elapsed:.0f}s elapsed",
-                        )
-                    result = await analysis_task
                     if not result.ai_used:
                         raise RuntimeError(
                             "Fireworks vision did not complete, so no local-only scan was accepted."
@@ -1239,11 +1213,9 @@ def main_page() -> None:
                 refresh_overlay()
                 visible_count = len(visible_suggestions())
                 model_label = FIREWORKS_MODEL_CATALOG[state.connected_model]["label"].split(" — ", 1)[0]
-                instruction_text = str(custom_instruction.value or "").strip()
-                scope_note = f" Instruction: {instruction_text}" if instruction_text else ""
                 status = (
                     f"Found {len(scanned_suggestions)} new suggestion(s); {visible_count} meet the current threshold. "
-                    f"Analysed {total_tokens} text token(s) using {model_label}.{scope_note}"
+                    f"Analysed {total_tokens} text token(s) using {model_label}."
                 )
                 analysis_status.set_text(status)
                 set_scan_progress(1.0, "Scan complete — review the suggestions below.")
