@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import asyncio
 import copy
 import os
+import time
 
 from nicegui import events, run, ui
 
@@ -48,7 +50,7 @@ FIREWORKS_MODEL_CATALOG: dict[str, dict[str, str]] = {
         "label": "Kimi K2.6 — Strong · premium",
         "strength": "STRONG",
         "billing": "Serverless: $0.95 input / $0.16 cached input / $4.00 output per 1M tokens",
-        "description": "Premium multimodal reasoning for difficult pages and ambiguous visual context; costly for routine scans.",
+        "description": "Premium multimodal reasoning for difficult pages. Aurora uses low reasoning effort and a longer timeout; expect slower scans than MiniMax or Qwen.",
     },
 }
 DEFAULT_UI_FIREWORKS_MODEL = "accounts/fireworks/models/minimax-m3"
@@ -589,8 +591,11 @@ def main_page() -> None:
                         placeholder="e.g. Redact every link and any picture containing a person.",
                     ).props("outlined autogrow clearable maxlength=700").classes("w-full")
                     ui.label(
-                        "Describe extra text or visual targets. Standard privacy checks still run alongside your instruction."
+                        "Leave blank to scan all privacy categories. Use wording such as ‘Only redact phone numbers’ to restrict the scan to that target."
                     ).classes("muted text-xs -mt-1")
+                    ui.label(
+                        "The selected vision model decides what is sensitive. OCR supplies text and coordinates; regex PII matching is not merged into AI results."
+                    ).classes("security-note")
                     with ui.row().classes("w-full gap-2 flex-wrap"):
                         all_links_button = ui.button(
                             "All links",
@@ -613,8 +618,8 @@ def main_page() -> None:
                         "Stores category-level accept/reject metadata only — never document text, images, coordinates or secret values."
                     ).classes("muted text-xs -mt-1")
 
-                    threshold_label = ui.label("Show suggestions at 60% confidence or higher").classes("muted text-sm")
-                    confidence_threshold = ui.slider(min=0.5, max=0.99, step=0.01, value=0.60).classes("w-full")
+                    threshold_label = ui.label("Show suggestions at 50% confidence or higher").classes("muted text-sm")
+                    confidence_threshold = ui.slider(min=0.5, max=0.99, step=0.01, value=0.50).classes("w-full")
                     analyze_button = ui.button("Run AI privacy scan", icon="auto_awesome").props("color=primary unelevated").classes("w-full")
                     analyze_button.disable()
 
@@ -641,6 +646,7 @@ def main_page() -> None:
                         select_all_button = ui.button("Select all", icon="done_all").props("outline dense")
                         clear_selection_button = ui.button("Clear", icon="remove_done").props("outline dense")
                         apply_suggestions_button = ui.button("Apply selected", icon="playlist_add_check").props("color=primary unelevated")
+                    suggestion_summary = ui.label("No AI scan results yet.").classes("muted text-xs")
                     ui.separator()
                     suggestions_container = ui.column().classes("suggestion-scroll w-full gap-2")
 
@@ -724,7 +730,7 @@ def main_page() -> None:
                     'fill="#02080d" fill-opacity="0.82" stroke="#5eead4" stroke-width="2" />'
                 )
 
-            threshold = float(confidence_threshold.value or 0.60)
+            threshold = float(confidence_threshold.value or 0.50)
             for suggestion in state.ai_suggestions:
                 if suggestion.page_index != state.current_page or suggestion.applied or suggestion.confidence < threshold:
                     continue
@@ -768,7 +774,7 @@ def main_page() -> None:
             download_button.disable()
 
         def visible_suggestions() -> list[SensitiveSuggestion]:
-            threshold = float(confidence_threshold.value or 0.60)
+            threshold = float(confidence_threshold.value or 0.50)
             return [
                 suggestion
                 for suggestion in state.ai_suggestions
@@ -778,9 +784,24 @@ def main_page() -> None:
         def render_suggestions() -> None:
             suggestions_container.clear()
             suggestions = visible_suggestions()
+            total = len(state.ai_suggestions)
+            hidden = max(0, total - len(suggestions))
+            if total == 0:
+                suggestion_summary.set_text("No AI scan results yet.")
+            elif hidden:
+                suggestion_summary.set_text(
+                    f"Showing {len(suggestions)} of {total} suggestion(s); {hidden} hidden by the confidence threshold."
+                )
+            else:
+                suggestion_summary.set_text(f"Showing all {total} suggestion(s).")
             with suggestions_container:
                 if not suggestions:
-                    ui.label("No suggestions at the current confidence threshold.").classes("muted text-sm")
+                    message = (
+                        "The AI returned no usable regions."
+                        if total == 0
+                        else "No suggestions meet the current confidence threshold."
+                    )
+                    ui.label(message).classes("muted text-sm")
                     return
 
                 for suggestion in suggestions:
@@ -832,7 +853,7 @@ def main_page() -> None:
                                     show_page_button.on("click", js_handler="event.stopPropagation()")
 
         def threshold_changed(event: events.ValueChangeEventArguments) -> None:
-            value = float(event.value or 0.60)
+            value = float(event.value or 0.50)
             threshold_label.set_text(f"Show suggestions at {value * 100:.0f}% confidence or higher")
             render_suggestions()
             refresh_overlay()
@@ -1179,20 +1200,36 @@ def main_page() -> None:
 
                     set_scan_progress(
                         page_start + page_span * 0.25,
-                        f"Running OCR, local detectors and Fireworks vision on page {page_index + 1}…",
+                        f"Running OCR and Fireworks vision on page {page_index + 1}…",
                     )
-                    result = await run.io_bound(
-                        analyze_page,
-                        page_index=page_index,
-                        image=image,
-                        view=view,
-                        embedded_words=words,
-                        use_ai=True,
-                        run_ocr=bool(run_ocr_checkbox.value),
-                        custom_instruction=str(custom_instruction.value or "").strip(),
-                        fireworks_api_key=state.connected_api_key,
-                        fireworks_model=state.connected_model,
+                    analysis_task = asyncio.create_task(
+                        run.io_bound(
+                            analyze_page,
+                            page_index=page_index,
+                            image=image,
+                            view=view,
+                            embedded_words=words,
+                            use_ai=True,
+                            run_ocr=bool(run_ocr_checkbox.value),
+                            custom_instruction=str(custom_instruction.value or "").strip(),
+                            fireworks_api_key=state.connected_api_key,
+                            fireworks_model=state.connected_model,
+                            use_local_calibration=bool(learn_from_review.value),
+                        )
                     )
+                    wait_started = time.monotonic()
+                    model_short_name = state.connected_model.rsplit("/", 1)[-1]
+                    while not analysis_task.done():
+                        await asyncio.sleep(0.75)
+                        elapsed = time.monotonic() - wait_started
+                        # Fireworks does not expose page-analysis percentage. This heartbeat
+                        # confirms the request is alive without falsely claiming completion.
+                        heartbeat = min(0.88, 0.25 + elapsed / 180.0 * 0.63)
+                        set_scan_progress(
+                            page_start + page_span * heartbeat,
+                            f"Waiting for {model_short_name} on page {page_index + 1}… {elapsed:.0f}s elapsed",
+                        )
+                    result = await analysis_task
                     if not result.ai_used:
                         raise RuntimeError(
                             "Fireworks vision did not complete, so no local-only scan was accepted."
@@ -1210,9 +1247,11 @@ def main_page() -> None:
                 refresh_overlay()
                 visible_count = len(visible_suggestions())
                 model_label = FIREWORKS_MODEL_CATALOG[state.connected_model]["label"].split(" — ", 1)[0]
+                instruction_text = str(custom_instruction.value or "").strip()
+                scope_note = f" Instruction: {instruction_text}" if instruction_text else ""
                 status = (
                     f"Found {len(scanned_suggestions)} new suggestion(s); {visible_count} meet the current threshold. "
-                    f"Analysed {total_tokens} text token(s) using {model_label}."
+                    f"Analysed {total_tokens} text token(s) using {model_label}.{scope_note}"
                 )
                 analysis_status.set_text(status)
                 set_scan_progress(1.0, "Scan complete — review the suggestions below.")

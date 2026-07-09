@@ -1,73 +1,107 @@
 # Aurora Document & Image Redactor
 
-A Python/NiceGUI application for manual and AI-assisted redaction of PDFs and ordinary image files. The interface uses a dark pearl-blue/green aurora theme, while every AI finding stays reviewable before it becomes a permanent redaction.
+Aurora is a Python/NiceGUI application for permanent manual and AI-assisted redaction of PDFs and image files. It uses a dark pearl-blue/green cybersecurity interface and keeps every AI finding reviewable before it becomes a redaction.
 
-## What is new
+## Current capabilities
 
-- Dark glass-style cybersecurity interface with rounded panels and an aurora blue/green palette.
-- **Ctrl+Z** undo for manual redactions, text selections, clearing a page and applying AI suggestions.
-- **Ctrl+Shift+Z** or **Ctrl+Y** redo.
-- An optional session-only Fireworks API-key connection step with explicit validation before AI scanning unlocks.
-- A Fireworks vision-model dropdown showing task strength, usage style and indicative serverless pricing. Changing the key or model invalidates the connection until it is checked again.
-- A live page-by-page scan progress bar. API credentials and model selection are locked while a scan is running.
-- A fully scrollable review sidebar split into separate scan-settings and suggestion sections.
-- Clickable suggestion cards with synchronized checkboxes and a clear selected-state highlight.
-- Full manual redaction, preview and export support without an API connection.
-- A custom AI instruction box, for example:
-  - `Redact every visible web link.`
-  - `Redact all faces and photographs containing people.`
-  - `Redact every signature and vehicle registration plate.`
-- Quick prompt presets for links, faces/photos and signatures.
-- Local URL matching when the user requests all links.
-- Local OpenCV face proposals when the user requests faces or pictures of people; the Fireworks vision model also checks the full page.
-- A reusable privacy knowledge pack covering all supported categories.
-- Synthetic few-shot examples supplied to the model on each scan.
-- Optional privacy-preserving local confidence calibration from accepted/rejected suggestions.
-- A starter JSONL dataset under `training_data/` for a future supervised fine-tuning workflow.
+- Upload PDFs, PNG, JPEG, WebP and BMP files.
+- Draw permanent redaction boxes manually without an API key.
+- Select real embedded PDF text and redact exact word regions.
+- Undo with `Ctrl+Z`; redo with `Ctrl+Shift+Z` or `Ctrl+Y`.
+- Preview the rewritten output before downloading it.
+- Enter and validate a Fireworks API key in the UI.
+- Choose MiniMax M3, Qwen 3.7 Plus or Kimi K2.6.
+- Run OCR on scanned pages and images.
+- Review confidence-scored AI suggestions in a scrollable sidebar.
+- Click suggestion cards or checkboxes to select and deselect them.
+- Apply only the selected suggestions.
+- Add a custom instruction, including strict instructions such as `Only redact phone numbers`.
 
-## Detection pipeline
+## Important detection behaviour
 
-1. PyMuPDF extracts embedded PDF text and exact word coordinates.
-2. RapidOCR reads scanned PDFs and images when **Use OCR** is enabled.
-3. Deterministic detectors catch rigid formats such as emails, tokens, IPs, IDs, cards, paths and authentication codes.
-4. Context detectors propose names and multi-line postal addresses.
-5. OpenCV detects QR codes and, when requested, face-like regions.
-6. The rendered page, token IDs, custom instruction, category playbook and compact examples are sent to the configured Fireworks vision model.
-7. The scan reports live page-by-page progress while the API key and model controls remain locked.
-8. Findings appear as confidence-scored suggestions in the independently scrollable sidebar.
-9. Click anywhere on a suggestion card, or use its checkbox, to select or deselect it.
-10. Only selected suggestions become redaction regions.
-11. The final PDF or image is permanently rewritten before download.
+The Fireworks vision model is the sole classifier for AI PII suggestions. OCR and embedded PDF extraction supply text and exact coordinates, but regex-based PII findings are not merged into AI scan results.
+
+Local QR-code localisation may still propose precise QR regions because it is a computer-vision detector rather than a text-pattern detector.
+
+### Blank custom instruction
+
+Leaving the custom instruction blank runs the complete privacy scan.
+
+### Additive custom instruction
+
+An ordinary instruction adds a custom target while retaining the normal privacy scan:
+
+```text
+Redact all faces and vehicle registration plates.
+```
+
+### Exclusive custom instruction
+
+Words such as `only`, `just`, `exclusively` or `solely` restrict the result categories:
+
+```text
+Only redact phone numbers.
+```
+
+Aurora reinforces this rule in the model prompt and filters the returned results again before showing them, preventing unrelated categories from appearing.
 
 ## Supported privacy categories
 
-- email addresses
-- phone numbers
-- home addresses where reasonably detectable
-- usernames
-- full names where confidently detected
-- account numbers
-- bank card-like numbers
+- Email addresses
+- Phone numbers
+- Home and postal addresses
+- Usernames
+- Full personal names
+- Account numbers
+- Bank-card-like numbers
 - API keys
-- access tokens
-- passwords or password-like fields
-- database connection strings
-- private keys
+- Access tokens
+- Passwords and password-like values
+- Database connection strings
+- Private keys
 - IP addresses
-- file paths
+- File paths
 - URLs containing sensitive query parameters
-- student IDs
-- employee IDs
-- dates of birth
-- private chat messages or message panels
-- authentication codes
+- Student IDs
+- Employee IDs
+- Dates of birth
+- Private chat messages and message panels
+- Authentication, OTP and MFA codes
 - QR codes
+- Ordinary links when requested
+- Faces and photographs when requested
+- Arbitrary custom text or visual regions
 
-The custom instruction can additionally request ordinary links, faces/photos, signatures, logos, number plates or other visible/textual targets.
+## Fireworks models
 
-## Run on Windows in VS Code
+| Model | Relative strength | Indicative serverless billing per 1M tokens | Notes |
+|---|---:|---:|---|
+| MiniMax M3 | Medium | $0.30 input / $0.06 cached / $1.20 output | Lowest-cost default for routine forms and screenshots |
+| Qwen 3.7 Plus | Strong | $0.40 input / $0.08 cached / $1.60 output | Recommended quality-to-cost balance |
+| Kimi K2.6 | Strong | $0.95 input / $0.16 cached / $4.00 output | Premium model for difficult pages; usually slower |
 
-From the folder containing `app.py`:
+Prices are indicative and can change. Check the Fireworks model library before production use.
+
+Aurora uses model-specific scan settings. Kimi K2.6 runs with low reasoning effort, a smaller response budget and a longer timeout to reduce unnecessary delay.
+
+## Progress behaviour
+
+Fireworks does not expose an exact page-analysis percentage. During a model request, Aurora therefore shows an elapsed-time heartbeat and advances conservatively within the current page stage. This confirms the request is still active without falsely claiming that the model is nearly finished.
+
+The scan now uses one JSON-mode Fireworks request per page instead of repeatedly trying several long response formats. If the request fails, the old suggestion set is restored and partial new results are discarded.
+
+## Accuracy improvements
+
+- The page image is sent at up to 2048 pixels on its longest side by default.
+- OCR and embedded-text tokens include normalised coordinates as well as token IDs.
+- The model can return token IDs for exact text boxes or visual bounding boxes for scanned and graphical regions.
+- Names and addresses receive explicit contextual instructions and synthetic examples.
+- Suggestion counts show how many results are visible and how many are hidden by the confidence threshold.
+- Local approval calibration is only applied when the user enables it.
+
+## Install and run on Windows
+
+Open the project folder in VS Code and run:
 
 ```powershell
 py -m venv .venv
@@ -84,69 +118,76 @@ Open:
 http://127.0.0.1:8081
 ```
 
-Manual redaction is available immediately. To unlock AI suggestions, enter a Fireworks API key in the **Fireworks Access** section, choose a model and press **Connect API key**. Aurora sends a deliberately tiny validation request to confirm both the credentials and access to the selected model. The check may incur negligible token usage.
+Manual redaction works immediately. AI scanning stays disabled until a Fireworks API key and model are validated through the **Connect API key** button.
 
-The key is kept only in the current page session and is not written to disk by Aurora. Manual uploading, box drawing, embedded-text selection, preview generation and export work without Fireworks. Only AI scanning remains locked until validation succeeds. There is no `.env` fallback and no unvalidated local-only AI scan mode in this build. Editing either the key or selected model immediately invalidates the connection and requires another connection check.
+## Optional runtime settings
 
-For a remotely hosted deployment, use HTTPS before allowing users to enter API keys. Never place real API keys in source code, README files, screenshots or Git commits.
+The API key is entered in the UI and is not read from `.env`. The `.env` file can contain local runtime settings:
 
-
-## Fireworks model selector
-
-The Fireworks Access section includes a curated list of serverless models that accept image input. The selected model is validated together with the key and is then used for every scan until the connection settings change.
-
-| Model | Task strength | Indicative serverless billing per 1M tokens | Best use |
-|---|---|---|---|
-| MiniMax M3 | Medium | $0.30 input / $0.06 cached / $1.20 output | Lowest-cost default for routine forms, screenshots and documents |
-| Qwen 3.7 Plus | Strong | $0.40 input / $0.08 cached / $1.60 output | Recommended quality-to-cost balance for complex layouts and contextual PII |
-| Kimi K2.6 | Strong | $0.95 input / $0.16 cached / $4.00 output | Premium multimodal reasoning for difficult or ambiguous pages |
-
-Image content is billed as input tokens. Prices are informational values checked in July 2026 and may change; confirm current rates in the Fireworks model library before production use.
-
-The strength rating is relative to this redaction-review task, not a general benchmark score. Local OCR, regular-expression detectors and QR detection run alongside the selected model, but their results are not accepted as a standalone scan when Fireworks is unavailable.
-
-## Connection and scan behaviour
-
-- The upload control is disabled until the Fireworks connection succeeds.
-- The **Run AI privacy scan** button is disabled until the connection succeeds.
-- Invalid or missing keys cannot fall back to local-only detection.
-- The API-key field, model selector and scan settings are disabled while a scan is active.
-- A live progress bar reports page rendering, OCR/detection and completion.
-- Scan results are staged and only replace the previous suggestion set after the full scan succeeds.
-- If a scan fails, partial results are discarded.
-- The AI review sidebar has its own vertical scrollbar, so long status messages and suggestion lists remain accessible.
-
-## Custom AI instructions
-
-The instruction is treated as an additional target; it does not replace the standard privacy scan. Text findings use exact OCR/PDF token boxes when possible. Visual findings use bounding boxes.
-
-Examples:
-
-```text
-Redact all visible links, including ordinary public URLs.
-Redact all profile pictures, faces and photographs containing people.
-Redact signatures, handwritten initials and passport photographs.
-Redact every mention of Project Aurora and its logo.
+```env
+FIREWORKS_IMAGE_MAX_SIDE=2048
+HOST=0.0.0.0
+PORT=8081
 ```
 
-## About the included “training” data
+The entered API key is held only in the current page session and is not written to disk by Aurora.
 
-`redaction_knowledge.py` and `training_data/redaction_examples.jsonl` improve inference through stronger instructions and few-shot examples. They **do not change the model’s weights**.
+## Basic workflow
 
-The optional local review setting stores only category, confidence, source and accept/reject metadata in `data/redaction_feedback.jsonl`. It never stores document text, images, coordinates or secret previews. Once enough reviews exist, the app applies a very small category-level confidence calibration.
+1. Upload a PDF or image.
+2. Add any manual boxes or embedded-text selections.
+3. Optionally connect Fireworks and choose a model.
+4. Enable OCR for scans, screenshots or image files.
+5. Leave the instruction blank for a full scan, or type a custom scope.
+6. Run the AI scan.
+7. Review the suggestion cards.
+8. Select only the suggestions you want.
+9. Press **Apply selected**.
+10. Generate the final preview.
+11. Inspect and download the permanently rewritten output.
 
-Actual vision-model fine-tuning must be run as a separate Fireworks training job using an image-and-text labelled dataset and a model supported for VLM fine-tuning. Fine-tuned LoRA models require an on-demand deployment rather than Fireworks serverless inference. See `TRAINING.md` for the recommended future path.
+## Project structure
 
-## Main files
+```text
+.
+├── app.py
+├── ai_service.py
+├── pdf_service.py
+├── redaction_knowledge.py
+├── feedback_store.py
+├── requirements.txt
+├── README.md
+├── TRAINING.md
+├── Dockerfile
+├── compose.yaml
+├── .env.example
+└── training_data/
+    └── redaction_examples.jsonl
+```
 
-- `app.py` — themed NiceGUI interface, keyboard history, sidebar and custom prompt
-- `ai_service.py` — OCR, local detectors, custom prompt handling and Fireworks vision integration
-- `redaction_knowledge.py` — category playbook and synthetic in-context examples
-- `feedback_store.py` — privacy-preserving local confidence calibration
-- `training_data/redaction_examples.jsonl` — starter synthetic dataset
-- `pdf_service.py` — rendering, coordinates and permanent PDF/image redaction
-- `.env.example` — optional host, port and image-size runtime settings; API keys are entered only in the UI
+### Main files
 
-## Privacy
+- `app.py`: NiceGUI interface, keyboard history, scan progress and suggestion review.
+- `ai_service.py`: OCR, token mapping, QR localisation, Fireworks request and result parsing.
+- `pdf_service.py`: rendering, coordinates and permanent PDF/image redaction.
+- `redaction_knowledge.py`: category definitions and synthetic in-context examples.
+- `feedback_store.py`: optional category-level review calibration without storing document contents.
+- `TRAINING.md`: future vision-model fine-tuning guidance.
 
-Connecting sends a tiny test completion to Fireworks. Running the Fireworks scan sends the rendered page, extracted text tokens and the selected model ID using the validated key. Aurora does not intentionally log or save the entered key. Only process documents you are authorised to send to a third-party API. Always review suggestions and the final preview: OCR, heuristics and vision models can miss content or produce false positives.
+## Privacy and security
+
+Running an AI scan sends the rendered page and extracted text tokens to Fireworks using the key entered by the user. Manual redaction, preview and export can be used without sending the document to Fireworks.
+
+Do not hard-code or commit API keys. Use HTTPS before deploying Aurora remotely. Only process documents that you are authorised to send to an external AI provider.
+
+AI, OCR and visual bounding boxes can produce false positives or false negatives. Always inspect every page of the final exported file before sharing it.
+
+## Current limitations
+
+- Password-protected PDFs are not supported.
+- Handwriting and very small text can be missed.
+- Serverless models can experience latency or capacity variation.
+- Kimi K2.6 can remain slower than the smaller options even with low reasoning effort.
+- Model bounding boxes may be approximate.
+- Custom requests depend on the selected model understanding the requested target.
+- This prototype is not a certified legal, compliance or classified-document redaction system.

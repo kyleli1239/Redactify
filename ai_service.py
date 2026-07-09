@@ -31,6 +31,74 @@ Rect = tuple[float, float, float, float]
 FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
 DEFAULT_FIREWORKS_MODEL = "accounts/fireworks/models/minimax-m3"
 
+MODEL_RUNTIME_CONFIG: dict[str, dict[str, object]] = {
+    "accounts/fireworks/models/minimax-m3": {"timeout": 120.0, "max_tokens": 2200},
+    "accounts/fireworks/models/qwen3p7-plus": {"timeout": 150.0, "max_tokens": 2200},
+    "accounts/fireworks/models/kimi-k2p6": {
+        "timeout": 240.0,
+        "max_tokens": 1800,
+        "reasoning_effort": "low",
+    },
+}
+
+EXCLUSIVE_INSTRUCTION_RE = re.compile(
+    r"(?i)\b(?:only|just|exclusively|solely|nothing\s+except|do\s+not\s+redact\s+anything\s+except)\b"
+)
+
+CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "email_address": ("email", "e-mail"),
+    "phone_number": ("phone number", "phone numbers", "telephone", "mobile number", "mobile numbers"),
+    "home_address": ("home address", "postal address", "residential address", "street address", "addresses"),
+    "username": ("username", "usernames", "handle", "handles"),
+    "full_name": ("full name", "full names", "person name", "people's names", "names"),
+    "account_number": ("account number", "account numbers"),
+    "bank_card_number": ("card number", "bank card", "credit card", "debit card"),
+    "api_key": ("api key", "api keys"),
+    "access_token": ("access token", "access tokens", "bearer token", "jwt"),
+    "password": ("password", "passwords", "passphrase"),
+    "database_connection_string": ("database connection", "connection string", "database url"),
+    "private_key": ("private key", "private keys", "pem key"),
+    "ip_address": ("ip address", "ip addresses", "ipv4", "ipv6"),
+    "file_path": ("file path", "file paths", "folder path", "directory path"),
+    "sensitive_url": ("sensitive url", "tokenised url", "signed url", "urls with tokens"),
+    "general_url": ("link", "links", "url", "urls", "hyperlink", "website"),
+    "student_id": ("student id", "student ids", "student number"),
+    "employee_id": ("employee id", "employee ids", "payroll id", "staff id"),
+    "date_of_birth": ("date of birth", "dates of birth", "dob", "birth date", "birthday"),
+    "private_chat": ("chat message", "chat messages", "message panel", "private chat", "conversation"),
+    "authentication_code": ("authentication code", "verification code", "otp", "mfa code", "2fa code"),
+    "qr_code": ("qr code", "qr codes"),
+    "person_image": ("face", "faces", "portrait", "portraits", "photo of people", "pictures of people", "person image"),
+}
+
+
+@dataclass(frozen=True)
+class InstructionScope:
+    text: str
+    exclusive: bool
+    allowed_categories: frozenset[str] | None
+
+
+def parse_instruction_scope(custom_instruction: str) -> InstructionScope:
+    text = re.sub(r"\s+", " ", custom_instruction or "").strip()
+    if not text:
+        return InstructionScope(text="", exclusive=False, allowed_categories=None)
+    lowered = text.lower()
+    exclusive = bool(EXCLUSIVE_INSTRUCTION_RE.search(lowered))
+    requested = {
+        category
+        for category, phrases in CATEGORY_KEYWORDS.items()
+        if any(phrase in lowered for phrase in phrases)
+    }
+    if exclusive:
+        # Unknown exclusive requests are still honoured through the custom_request category.
+        return InstructionScope(
+            text=text,
+            exclusive=True,
+            allowed_categories=frozenset(requested or {"custom_request"}),
+        )
+    return InstructionScope(text=text, exclusive=False, allowed_categories=None)
+
 
 def _safe_api_error(exc: Exception, api_key: str) -> str:
     """Return a user-safe SDK error without reflecting the supplied secret."""
@@ -1041,7 +1109,7 @@ def _image_data_url(image: Image.Image) -> str:
     """Encode a downsized page as a base64 JPEG accepted by Fireworks vision models."""
 
     page_image = image.copy()
-    maximum_side = int(os.getenv("FIREWORKS_IMAGE_MAX_SIDE", "1600"))
+    maximum_side = int(os.getenv("FIREWORKS_IMAGE_MAX_SIDE", "2048"))
     if maximum_side > 0 and max(page_image.size) > maximum_side:
         scale = maximum_side / max(page_image.size)
         page_image = page_image.resize(
@@ -1097,16 +1165,48 @@ def _extract_json(content: str) -> str:
     return clean
 
 
-def _vision_prompt_payload(tokens: Sequence[AnalysisToken]) -> str:
+def _message_content_text(content: object) -> str:
+    """Normalise OpenAI-compatible text or content-block responses."""
+
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                value = block.get("text") or block.get("content")
+            else:
+                value = getattr(block, "text", None) or getattr(block, "content", None)
+            if value:
+                parts.append(str(value))
+        return "".join(parts)
+    return str(content)
+
+
+def _vision_prompt_payload(tokens: Sequence[AnalysisToken], view: PageView) -> str:
+    """Return OCR/embedded tokens with image-relative locations for reliable ID matching."""
+
     lines = _build_lines(tokens)
     payload = []
     for line_index, line in enumerate(lines):
-        payload.append(
-            {
-                "line_id": f"L{line_index}",
-                "tokens": [{"id": token.token_id, "text": token.text} for token in line.tokens],
-            }
-        )
+        token_rows = []
+        for token in line.tokens:
+            x0, y0, x1, y1 = normalise_rect(token.rect)
+            token_rows.append(
+                {
+                    "id": token.token_id,
+                    "text": token.text,
+                    "bbox": [
+                        round(x0 / max(view.page_width, 1e-6) * 1000),
+                        round(y0 / max(view.page_height, 1e-6) * 1000),
+                        round(x1 / max(view.page_width, 1e-6) * 1000),
+                        round(y1 / max(view.page_height, 1e-6) * 1000),
+                    ],
+                }
+            )
+        payload.append({"line_id": f"L{line_index}", "tokens": token_rows})
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -1216,53 +1316,63 @@ def _call_fireworks_vision(
         or os.getenv("FIREWORKS_MODEL", "").strip()
         or DEFAULT_FIREWORKS_MODEL
     )
-    client = OpenAI(api_key=api_key, base_url=FIREWORKS_BASE_URL)
+    runtime = MODEL_RUNTIME_CONFIG.get(model, {"timeout": 150.0, "max_tokens": 2200})
+    timeout = float(runtime.get("timeout", 150.0))
+    max_tokens = int(runtime.get("max_tokens", 2200))
+    client = OpenAI(
+        api_key=api_key,
+        base_url=FIREWORKS_BASE_URL,
+        timeout=timeout,
+        max_retries=1,
+    )
 
-    def safe_error(exc: Exception) -> str:
-        return _safe_api_error(exc, api_key)
     token_lookup = {token.token_id: token for token in tokens}
     page_image = _document_crop(image, view)
     data_url = _image_data_url(page_image)
+    scope = parse_instruction_scope(custom_instruction)
 
-    custom_instruction = custom_instruction.strip()
-    custom_rule = (
-        "\nCUSTOM REDACTION INSTRUCTION FROM THE USER: " + custom_instruction +
-        "\nTreat this instruction as an additional target. Use general_url for ordinary links, "
-        "person_image for photographs/faces/portraits, or custom_request for other requested targets. "
-        "Do not ignore the standard privacy categories.\n"
-        if custom_instruction
-        else ""
-    )
-    system_prompt = f"""You are a high-recall visual privacy detector for a human-reviewed redaction application.
-Inspect the document or screenshot image and return JSON only. Identify likely sensitive information, but do not redact anything yourself. The user will approve or reject every suggestion, so prefer a calibrated suggestion over silently missing plausible private data.
+    if scope.exclusive:
+        allowed_text = ", ".join(sorted(scope.allowed_categories or ("custom_request",)))
+        instruction_rule = (
+            f"\nSTRICT USER SCOPE: {scope.text}\n"
+            f"Return ONLY these categories: {allowed_text}. Do not return any other standard privacy category, "
+            "even if other sensitive information is visible.\n"
+        )
+    elif scope.text:
+        instruction_rule = (
+            f"\nADDITIONAL USER REQUEST: {scope.text}\n"
+            "Run the normal privacy scan and also include regions matching this request. Use general_url for ordinary "
+            "links, person_image for people/faces/photos, or custom_request when no standard category fits.\n"
+        )
+    else:
+        instruction_rule = "\nNo custom instruction was supplied. Run the complete standard privacy scan.\n"
+
+    system_prompt = f"""You are the sole sensitive-information detector for a human-reviewed redaction application.
+Inspect the supplied page image and extracted text tokens. Return JSON only with this exact top-level shape: {{"findings": [...]}}.
+Do not use regex-style guessing and do not infer values that are not actually visible. Prefer accurate, complete findings over speculative quantity.
 Allowed categories: email_address, phone_number, home_address, username, full_name, account_number, bank_card_number, api_key, access_token, password, database_connection_string, private_key, ip_address, file_path, sensitive_url, student_id, employee_id, date_of_birth, private_chat, authentication_code, qr_code, general_url, person_image, custom_request.
 
 Output rules:
-- Return one finding per sensitive value or coherent private visual region.
-- confidence must be a calibrated probability from 0 to 1. Omit weak guesses below 0.55.
-- token_ids must contain only IDs from the supplied token list. Use them whenever the target corresponds to extracted text because they provide exact word boxes.
-- bbox is [x0,y0,x1,y1] in a 0..1000 coordinate system relative to the supplied image. Use bbox for visual regions, scanned text not represented by tokens, QR codes, faces/photos, private chat panels, signatures, or when token boxes are insufficient.
-- A finding may contain both token_ids and bbox. Do not invent token IDs.
-- Select the sensitive value rather than harmless field labels, except private_chat where a coherent message bubble or panel can be selected.
-- full_name: include complete personal names in forms, CVs, letters, account pages, messages, signatures and profile headers. Do not return company, product or organisation names.
-- home_address: include house/flat, street, locality/city and postcode where visible; return one coherent finding.
-- sensitive_url is for links carrying credentials, tokens, sessions, signatures or one-time codes. general_url is for ordinary links only when requested.
-- private_chat should cover actual private message content or the coherent message panel.
-- qr_code should locate every visible QR code even when its payload cannot be decoded.
-- person_image should cover the face or portrait/photo region requested by the user.
-- preview must be short and mask secrets where possible.
-- reason must be concise.
-
+- Return one finding per sensitive value or coherent visual region.
+- confidence is a calibrated probability from 0 to 1. Include plausible review suggestions at 0.50 or above.
+- token_ids may contain only IDs from TOKENS_JSON. Use token_ids whenever the target is represented by extracted text.
+- bbox is [x0,y0,x1,y1] in a 0..1000 coordinate system relative to the supplied page image. Use it for visual regions or text not represented by tokens.
+- Select the sensitive value, not harmless field labels.
+- full_name: identify real personal names in forms, CV headers, letters, profiles, signatures and conversations; exclude organisations and job titles.
+- home_address: include the complete coherent address, including unit/house, street, city/locality and postcode where shown.
+- private_chat: cover the message text or coherent message bubble/panel, not the entire page unless necessary.
+- qr_code: locate every visible QR code when this category is in scope.
+- preview must be short and masked where appropriate. reason must be concise.
+{instruction_rule}
 DETECTION_PLAYBOOK_JSON={compact_playbook()}
-SYNTHETIC_FEW_SHOT_EXAMPLES_JSON={compact_examples()}
-{custom_rule}
-The response must match the supplied JSON schema."""
+SYNTHETIC_EXAMPLES_JSON={compact_examples()}
+"""
 
-    text_payload = _vision_prompt_payload(tokens)
+    text_payload = _vision_prompt_payload(tokens, view)
     user_text = (
-        "Review this page for sensitive information. The optional OCR/embedded-text tokens below may help you "
-        "return exact token IDs; also inspect the image itself for visual content and regions not present in OCR.\n\n"
-        + (f"CUSTOM_INSTRUCTION={custom_instruction}\n\n" if custom_instruction else "")
+        "Inspect this page now. Match visible text to exact token IDs wherever possible. "
+        "Return only the JSON object; no markdown or commentary.\n\n"
+        + (f"USER_INSTRUCTION={scope.text}\nUSER_SCOPE={'exclusive' if scope.exclusive else 'additive'}\n\n" if scope.text else "")
         + f"TOKENS_JSON={text_payload}"
     )
     messages = [
@@ -1276,52 +1386,28 @@ The response must match the supplied JSON schema."""
         },
     ]
 
-    parsed: _VisionResponse | None = None
-    errors: list[str] = []
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {"name": "SensitiveVisualFindings", "schema": _model_schema()},
-            },
-            temperature=0,
-            max_tokens=5000,
-            timeout=120,
-        )
-        content = response.choices[0].message.content or '{"findings":[]}'
-        parsed = _VisionResponse.model_validate_json(_extract_json(content))
-    except Exception as schema_exc:
-        errors.append(f"schema request: {safe_error(schema_exc)}")
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                response_format={"type": "json_object"},
-                temperature=0,
-                max_tokens=5000,
-                timeout=120,
-            )
-            content = response.choices[0].message.content or '{"findings":[]}'
-            parsed = _VisionResponse.model_validate_json(_extract_json(content))
-        except Exception as json_exc:
-            errors.append(f"JSON request: {safe_error(json_exc)}")
-            try:
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=0,
-                    max_tokens=5000,
-                    timeout=120,
-                )
-                content = response.choices[0].message.content or '{"findings":[]}'
-                parsed = _VisionResponse.model_validate_json(_extract_json(content))
-            except Exception as plain_exc:
-                errors.append(f"plain request: {safe_error(plain_exc)}")
+    request_kwargs: dict[str, object] = {
+        "model": model,
+        "messages": messages,
+        "response_format": {"type": "json_object"},
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "timeout": timeout,
+    }
+    reasoning_effort = runtime.get("reasoning_effort")
+    if reasoning_effort:
+        request_kwargs["extra_body"] = {"reasoning_effort": reasoning_effort}
 
-    if parsed is None:
-        return [], [f"Fireworks vision analysis failed on page {page_index + 1}: {'; '.join(errors)}"], False
+    try:
+        response = client.chat.completions.create(**request_kwargs)
+        message = response.choices[0].message
+        content = _message_content_text(getattr(message, "content", None))
+        if not content:
+            raise ValueError("The model returned no JSON content.")
+        parsed = _VisionResponse.model_validate_json(_extract_json(content))
+    except Exception as exc:
+        safe_message = _safe_api_error(exc, api_key)
+        return [], [f"Fireworks vision analysis failed on page {page_index + 1}: {safe_message}"], False
 
     findings: list[SensitiveSuggestion] = []
     model_name = model.rsplit("/", 1)[-1]
@@ -1329,9 +1415,11 @@ The response must match the supplied JSON schema."""
         category = model_finding.category.strip().lower()
         if category not in VALID_CATEGORIES:
             continue
+        if scope.allowed_categories is not None and category not in scope.allowed_categories:
+            continue
 
         confidence = max(0.0, min(float(model_finding.confidence), 0.995))
-        if confidence < 0.55:
+        if confidence < 0.50:
             continue
 
         matched_tokens = [
@@ -1431,6 +1519,7 @@ def analyze_page(
     custom_instruction: str = "",
     fireworks_api_key: str | None = None,
     fireworks_model: str | None = None,
+    use_local_calibration: bool = False,
 ) -> AnalysisResult:
     embedded = embedded_tokens(embedded_words, page_index)
     warnings: list[str] = []
@@ -1443,22 +1532,19 @@ def analyze_page(
             warnings.append(f"Local OCR failed on page {page_index + 1}: {exc}")
 
     tokens = merge_embedded_and_ocr(embedded, ocr)
-    suggestions = local_pattern_suggestions(tokens, page_index)
+    # AI scan results are model-driven. We intentionally do not merge regex or
+    # heuristic PII detections here, because that made strict custom instructions
+    # impossible to honour and could overwhelm the model's contextual findings.
+    suggestions: list[SensitiveSuggestion] = []
+    scope = parse_instruction_scope(custom_instruction)
 
-    try:
-        suggestions.extend(detect_qr_codes(image, view, page_index))
-    except Exception as exc:
-        warnings.append(f"QR detection failed on page {page_index + 1}: {exc}")
-
-    suggestions.extend(
-        custom_prompt_local_suggestions(
-            custom_instruction=custom_instruction,
-            tokens=tokens,
-            image=image,
-            view=view,
-            page_index=page_index,
-        )
-    )
+    # QR localisation is computer vision rather than regex. Keep it as a precise
+    # visual helper only when the standard scan or the requested scope includes QR.
+    if scope.allowed_categories is None or "qr_code" in scope.allowed_categories:
+        try:
+            suggestions.extend(detect_qr_codes(image, view, page_index))
+        except Exception as exc:
+            warnings.append(f"QR detection failed on page {page_index + 1}: {exc}")
 
     ai_used = False
     if use_ai:
@@ -1487,7 +1573,8 @@ def analyze_page(
             suggestion.rects = [_pad_rect((x0, y0, x1, y1), 6.0, view)]
 
     merged = _merge_suggestions(suggestions)
-    apply_local_calibration(merged)
+    if use_local_calibration:
+        apply_local_calibration(merged)
     return AnalysisResult(
         suggestions=merged,
         warnings=tuple(dict.fromkeys(warnings)),
