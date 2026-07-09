@@ -176,8 +176,9 @@ def main_page() -> None:
             background: linear-gradient(90deg, #5eead4, #7dd3fc, #a78bfa);
         }
         .suggestion-scroll {
-            min-height: 190px; overflow: visible; padding-right: .15rem;
+            min-height: 190px; width: 100%; overflow: visible; padding-right: .15rem;
         }
+        .suggestion-scroll > * { width: 100%; }
         .sidebar-section {
             border: 1px solid rgba(125,211,252,.14); border-radius: 18px;
             background: linear-gradient(135deg, rgba(4,22,29,.72), rgba(8,28,38,.48));
@@ -781,8 +782,73 @@ def main_page() -> None:
                 if suggestion.confidence >= threshold
             ]
 
+        @ui.refreshable
+        def suggestion_cards() -> None:
+            suggestions = visible_suggestions()
+            total = len(state.ai_suggestions)
+            if not suggestions:
+                message = (
+                    "The AI returned no usable regions."
+                    if total == 0
+                    else "No suggestions meet the current confidence threshold."
+                )
+                ui.label(message).classes("muted text-sm")
+                return
+
+            for suggestion in suggestions:
+                card_classes = "suggestion-card w-full p-3"
+                if suggestion.selected and not suggestion.applied:
+                    card_classes += " suggestion-card-selected"
+                if suggestion.applied:
+                    card_classes += " suggestion-card-applied"
+
+                def toggle_suggestion(item=suggestion) -> None:
+                    if item.applied or state.scan_in_progress:
+                        return
+                    item.selected = not item.selected
+                    render_suggestions()
+                    refresh_overlay()
+
+                with ui.element("div").classes(card_classes).on("click", toggle_suggestion):
+                    with ui.row().classes("w-full items-start gap-2 no-wrap"):
+                        checkbox = ui.checkbox(value=suggestion.selected and not suggestion.applied)
+                        checkbox.set_enabled(not suggestion.applied and not state.scan_in_progress)
+                        checkbox.on("click", js_handler="event.stopPropagation()")
+
+                        def update_selection(event: events.ValueChangeEventArguments, item=suggestion) -> None:
+                            if item.applied or state.scan_in_progress:
+                                return
+                            item.selected = bool(event.value)
+                            render_suggestions()
+                            refresh_overlay()
+
+                        checkbox.on_value_change(update_selection)
+                        with ui.column().classes("grow min-w-0 gap-1"):
+                            with ui.row().classes("items-center gap-2 flex-wrap"):
+                                ui.badge(suggestion.category_label)
+                                ui.label(f"{suggestion.confidence * 100:.0f}% • Page {suggestion.page_index + 1}").classes(
+                                    "font-semibold confidence-glow"
+                                )
+                                if len(suggestion.rects) > 1:
+                                    ui.badge(f"{len(suggestion.rects)} regions").props("outline color=secondary")
+                                if suggestion.applied:
+                                    ui.badge("Applied").props("color=positive")
+                            ui.label(suggestion.preview).classes("text-sm break-all")
+                            ui.label(f"{suggestion.reason} Source: {suggestion.source}.").classes(
+                                "muted text-xs break-words"
+                            )
+                            if suggestion.page_index != state.current_page:
+                                show_page_button = ui.button(
+                                    "Show page",
+                                    icon="find_in_page",
+                                    on_click=lambda page=suggestion.page_index: show_page(page),
+                                ).props("flat dense").classes("self-start")
+                                show_page_button.on("click", js_handler="event.stopPropagation()")
+
+        with suggestions_container:
+            suggestion_cards()
+
         def render_suggestions() -> None:
-            suggestions_container.clear()
             suggestions = visible_suggestions()
             total = len(state.ai_suggestions)
             hidden = max(0, total - len(suggestions))
@@ -794,63 +860,7 @@ def main_page() -> None:
                 )
             else:
                 suggestion_summary.set_text(f"Showing all {total} suggestion(s).")
-            with suggestions_container:
-                if not suggestions:
-                    message = (
-                        "The AI returned no usable regions."
-                        if total == 0
-                        else "No suggestions meet the current confidence threshold."
-                    )
-                    ui.label(message).classes("muted text-sm")
-                    return
-
-                for suggestion in suggestions:
-                    card_classes = "suggestion-card w-full p-3"
-                    if suggestion.selected and not suggestion.applied:
-                        card_classes += " suggestion-card-selected"
-                    if suggestion.applied:
-                        card_classes += " suggestion-card-applied"
-
-                    def toggle_suggestion(item=suggestion) -> None:
-                        if item.applied or state.scan_in_progress:
-                            return
-                        item.selected = not item.selected
-                        render_suggestions()
-                        refresh_overlay()
-
-                    with ui.card().classes(card_classes).on("click", toggle_suggestion):
-                        with ui.row().classes("w-full items-start gap-2"):
-                            checkbox = ui.checkbox(value=suggestion.selected and not suggestion.applied)
-                            checkbox.set_enabled(not suggestion.applied and not state.scan_in_progress)
-                            checkbox.on("click", js_handler="event.stopPropagation()")
-
-                            def update_selection(event: events.ValueChangeEventArguments, item=suggestion) -> None:
-                                if item.applied or state.scan_in_progress:
-                                    return
-                                item.selected = bool(event.value)
-                                render_suggestions()
-                                refresh_overlay()
-
-                            checkbox.on_value_change(update_selection)
-                            with ui.column().classes("grow gap-0"):
-                                with ui.row().classes("items-center gap-2 flex-wrap"):
-                                    ui.badge(suggestion.category_label)
-                                    ui.label(f"{suggestion.confidence * 100:.0f}% • Page {suggestion.page_index + 1}").classes(
-                                        "font-semibold confidence-glow"
-                                    )
-                                    if suggestion.applied:
-                                        ui.badge("Applied").props("color=positive")
-                                ui.label(suggestion.preview).classes("text-sm break-all")
-                                ui.label(f"{suggestion.reason} Source: {suggestion.source}.").classes(
-                                    "muted text-xs"
-                                )
-                                if suggestion.page_index != state.current_page:
-                                    show_page_button = ui.button(
-                                        "Show page",
-                                        icon="find_in_page",
-                                        on_click=lambda page=suggestion.page_index: show_page(page),
-                                    ).props("flat dense").classes("self-start")
-                                    show_page_button.on("click", js_handler="event.stopPropagation()")
+            suggestion_cards.refresh()
 
         def threshold_changed(event: events.ValueChangeEventArguments) -> None:
             value = float(event.value or 0.50)

@@ -1210,6 +1210,103 @@ def _vision_prompt_payload(tokens: Sequence[AnalysisToken], view: PageView) -> s
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _normalise_match_token(text: str) -> str:
+    """Normalise token text for exact occurrence propagation, not PII classification."""
+
+    return re.sub(r"(^[^\w@+]+|[^\w@.+-]+$)", "", text.casefold()).strip()
+
+
+def _tokens_overlapping_rect(tokens: Sequence[AnalysisToken], rect: Rect) -> list[AnalysisToken]:
+    x0, y0, x1, y1 = normalise_rect(rect)
+    matched: list[AnalysisToken] = []
+    for token in tokens:
+        tx0, ty0, tx1, ty1 = normalise_rect(token.rect)
+        overlap_w = max(0.0, min(x1, tx1) - max(x0, tx0))
+        overlap_h = max(0.0, min(y1, ty1) - max(y0, ty0))
+        token_area = max((tx1 - tx0) * (ty1 - ty0), 1e-6)
+        if overlap_w * overlap_h / token_area >= 0.45:
+            matched.append(token)
+    return matched
+
+
+_STREET_SUFFIXES = {
+    "alley", "avenue", "boulevard", "close", "court", "crescent", "drive",
+    "gardens", "grove", "hill", "lane", "mews", "place", "road", "row",
+    "square", "street", "terrace", "view", "walk", "way",
+}
+
+
+def _candidate_occurrence_phrases(
+    matched_tokens: Sequence[AnalysisToken],
+    category: str,
+) -> list[tuple[str, ...]]:
+    """Build literal phrase variants from a value already classified by the AI."""
+
+    ordered_lines = _build_lines(matched_tokens)
+    phrases: list[tuple[str, ...]] = []
+
+    def add(values: Sequence[str]) -> None:
+        phrase = tuple(value for value in (_normalise_match_token(item) for item in values) if value)
+        if phrase and phrase not in phrases:
+            phrases.append(phrase)
+
+    for line in ordered_lines:
+        values = [token.text for token in line.tokens]
+        add(values)
+
+        normalised = [_normalise_match_token(value) for value in values]
+        if category == "full_name" and len(normalised) >= 2:
+            # A document often introduces a middle name once, then uses first + surname later.
+            add((values[0], values[-1]))
+
+        if category == "home_address":
+            # Propagate the street portion of a complete address, e.g. the model finds
+            # "22 Brookside Lane, London NW4 1AB" and later text says "22 Brookside Lane".
+            for index, value in enumerate(normalised):
+                if value in _STREET_SUFFIXES and index >= 1:
+                    add(values[: index + 1])
+                    break
+
+    # Also keep the complete reading-order phrase for short single-line values.
+    flat = [token.text for line in ordered_lines for token in line.tokens]
+    if len(flat) <= 12:
+        add(flat)
+    return phrases
+
+
+def _expand_literal_occurrences(
+    all_tokens: Sequence[AnalysisToken],
+    matched_tokens: Sequence[AnalysisToken],
+    category: str,
+) -> list[AnalysisToken]:
+    """Add every literal occurrence of an AI-identified value on the same page.
+
+    This does not classify text with regex. The vision model first identifies the
+    sensitive value; this helper only finds repeated render locations for that
+    already-approved literal value or safe category-specific variants.
+    """
+
+    if not matched_tokens:
+        return []
+    phrases = _candidate_occurrence_phrases(matched_tokens, category)
+    if not phrases:
+        return list(matched_tokens)
+
+    found: dict[str, AnalysisToken] = {token.token_id: token for token in matched_tokens}
+    for line in _build_lines(all_tokens):
+        line_tokens = list(line.tokens)
+        normalised = [_normalise_match_token(token.text) for token in line_tokens]
+        for phrase in phrases:
+            width = len(phrase)
+            if width == 0 or width > len(normalised):
+                continue
+            for start in range(0, len(normalised) - width + 1):
+                if tuple(normalised[start : start + width]) == phrase:
+                    for token in line_tokens[start : start + width]:
+                        found[token.token_id] = token
+    return list(found.values())
+
+
 
 def _custom_prompt_requests_links(custom_instruction: str) -> bool:
     text = custom_instruction.lower()
@@ -1358,6 +1455,7 @@ Output rules:
 - token_ids may contain only IDs from TOKENS_JSON. Use token_ids whenever the target is represented by extracted text.
 - bbox is [x0,y0,x1,y1] in a 0..1000 coordinate system relative to the supplied page image. Use it for visual regions or text not represented by tokens.
 - Select the sensitive value, not harmless field labels.
+- Find every visible occurrence of each sensitive value on the page, including repeated mentions in later paragraphs or evidence lists. Include all matching token IDs, not only the first occurrence.
 - full_name: identify real personal names in forms, CV headers, letters, profiles, signatures and conversations; exclude organisations and job titles.
 - home_address: include the complete coherent address, including unit/house, street, city/locality and postcode where shown.
 - private_chat: cover the message text or coherent message bubble/panel, not the entire page unless necessary.
@@ -1428,9 +1526,17 @@ SYNTHETIC_EXAMPLES_JSON={compact_examples()}
             if token_id in token_lookup
         ]
         unique_tokens = list({token.token_id: token for token in matched_tokens}.values())
-        rects = _rects_for_tokens(unique_tokens)
         bbox_rect = _bbox_to_page_rect(model_finding.bbox, view)
-        if bbox_rect is not None:
+        if not unique_tokens and bbox_rect is not None:
+            unique_tokens = _tokens_overlapping_rect(tokens, bbox_rect)
+
+        original_token_count = len(unique_tokens)
+        unique_tokens = _expand_literal_occurrences(tokens, unique_tokens, category)
+        unique_tokens = list({token.token_id: token for token in unique_tokens}.values())
+        rects = _rects_for_tokens(unique_tokens)
+        # Keep a model bbox for visual-only findings. For text findings, exact token
+        # boxes are safer and avoid unnecessarily covering adjacent text.
+        if bbox_rect is not None and not unique_tokens:
             rects.append(bbox_rect)
         if not rects:
             continue
@@ -1445,6 +1551,11 @@ SYNTHETIC_EXAMPLES_JSON={compact_examples()}
         if not raw_preview:
             raw_preview = CATEGORY_LABELS.get(category, category.replace("_", " ").title())
 
+        base_reason = model_finding.reason.strip() or "The vision model identified this region as potentially sensitive."
+        added_occurrences = max(0, len(unique_tokens) - original_token_count)
+        if added_occurrences:
+            base_reason += f" Aurora also matched {added_occurrences} repeated text token(s) on this page."
+
         findings.append(
             _make_suggestion(
                 page_index=page_index,
@@ -1452,7 +1563,7 @@ SYNTHETIC_EXAMPLES_JSON={compact_examples()}
                 confidence=confidence,
                 rects=rects,
                 raw_preview=raw_preview,
-                reason=model_finding.reason.strip() or "The vision model identified this region as potentially sensitive.",
+                reason=base_reason,
                 source=f"Fireworks vision ({model_name})",
                 token_ids=[token.token_id for token in unique_tokens],
             )
