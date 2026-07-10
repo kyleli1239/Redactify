@@ -1,6 +1,8 @@
 # Redactify
 
-Redactify is an AI-assisted document and image redaction tool designed to help users permanently remove sensitive content and personally identifiable information (PII) from PDFs and images. The application combines local document processing with Fireworks AI vision analysis to detect likely private information, then lets users review and manually apply redactions with full control.
+Redactify is an AI-assisted document and image redaction tool designed to help users permanently remove sensitive content and personally identifiable information (PII) from PDFs and images. The application combines local document processing with Fireworks AI vision analysis to detect likely private information, then lets users review and manually apply redactions with full control. 
+
+It is built on the Fireworks AI API, leveraging open-source large language models accelerated by AMD GPU compute resources. Every document analysis request is processed through Fireworks' AMD-powered inference infrastructure, enabling fast, scalable and reliable extraction of sensitive data without requiring users to manage their own AI hardware
 
 ---
 
