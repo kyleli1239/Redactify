@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import copy
 import os
-
+from fastapi import FastAPI
 from nicegui import events, run, ui
 
 from ai_service import SensitiveSuggestion, analyze_page, validate_fireworks_connection
