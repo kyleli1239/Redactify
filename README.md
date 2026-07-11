@@ -148,6 +148,10 @@ docker compose up --build
 
 The app will be available at http://localhost:8081.
 
+## Serverless deployment
+
+For platforms such as Vercel, the repository now includes a lightweight serverless entrypoint at [api/index.py](api/index.py) and a minimal dependency file at [requirements-serverless.txt](requirements-serverless.txt). Deploy the serverless function from that entrypoint if you want to avoid shipping the full desktop-style app bundle.
+
 ---
 
 ## Using Fireworks AI
