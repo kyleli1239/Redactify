@@ -219,7 +219,7 @@ This is just a working prototype. Some features have not been fully developed.
 * Password-protected PDFs are not supported.
 * OCR accuracy depends on image quality.
 * Handwriting detection is limited.
-* Face detection has not been fully developed
+* Face and image detection has not been fully developed
 * Vision-model bounding boxes may be approximate.
 * AI confidence is not a security guarantee.
 * Malformed PDFs may prevent optional deep sanitisation.
