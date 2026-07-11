@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import copy
 import os
-from fastapi import FastAPI
+
 from nicegui import events, run, ui
 
 from ai_service import SensitiveSuggestion, analyze_page, validate_fireworks_connection
@@ -25,6 +25,22 @@ from pdf_service import (
     validate_image,
     validate_pdf,
 )
+
+
+def app(environ: object, start_response: object) -> list[bytes]:
+    status = "200 OK"
+    headers = [("Content-Type", "text/html; charset=utf-8")]
+    body = b"""
+    <html><body>
+    <h1>Redactify</h1>
+    <p>This deployment stub is for Vercel compatibility. Run the interactive app locally with python app.py.</p>
+    </body></html>
+    """
+    start_response(status, headers)
+    return [body]
+
+
+application = app
 
 MIN_RECT_SIZE = 2.0
 CLICK_TOLERANCE = 3.0
