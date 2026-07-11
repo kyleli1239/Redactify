@@ -1,2 +1,0 @@
-# Minimal serverless runtime for deployment stub.
-# The full interactive app remains available via app.py and requirements.txt.
