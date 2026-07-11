@@ -1,6 +1,8 @@
 # Redactify
 
-Redactify is an AI-assisted document and image redaction tool designed to help users permanently remove sensitive content and personally identifiable information (PII) from PDFs and images. The application combines local document processing with Fireworks AI vision analysis to detect likely private information, then lets users review and manually apply redactions with full control.
+Redactify is an AI-assisted document and image redaction tool designed to help users permanently remove sensitive content and personally identifiable information (PII) from PDFs and images. The application combines local document processing with Fireworks AI vision analysis to detect likely private information, then lets users review and manually apply redactions with full control. 
+
+It is built on the Fireworks AI API, leveraging open-source large language models accelerated by AMD GPU compute resources. Every document analysis request is processed through Fireworks' AMD-powered inference infrastructure, enabling fast, scalable and reliable extraction of sensitive data without requiring users to manage their own AI hardware
 
 ---
 
@@ -75,7 +77,6 @@ Ctrl + Y          Redo
 
 Manual redaction is also useful if a Fireworks API key is missing allowing you to still redact PPI without using the AI assistance tool
 
-
 ---
 
 ## AI processing workflow
@@ -86,10 +87,6 @@ Upload PDF or image
 Extract embedded PDF text
         ↓
 Optionally run local OCR
-        ↓
-Run local pattern and contextual detectors
-        ↓
-Run QR and requested face/link detectors
         ↓
 Send the rendered page and extracted tokens to Fireworks
         ↓
@@ -110,12 +107,13 @@ Download permanently redacted output
 * NiceGUI
 * PyMuPDF
 * Pillow
+* OpenAI
 * OpenCV
 * RapidOCR
 * NumPy
 * Pydantic
 * OpenAI-compatible Fireworks client
-* python-dotenv
+* Docker
 
 ---
 
@@ -132,17 +130,6 @@ Install dependencies:
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-Create a file named `.env` in the project root:
-
-```env
-FIREWORKS_API_KEY=replace_with_your_fireworks_api_key
-FIREWORKS_VISION_MODEL=accounts/fireworks/models/minimax-m3
-
-HOST=0.0.0.0
-PORT=8081
-FIREWORKS_IMAGE_MAX_SIDE=1600
 ```
 
 ## Run locally
@@ -163,6 +150,24 @@ The app will be available at http://localhost:8081.
 
 ---
 
+## Using Fireworks AI
+
+To use Fireworks AI, an API key is needed https://fireworks.ai/
+
+1. Run the application through ```python app.py```
+2. Open http://localhost:8081 in your browser (this should happen automatically)
+3. Enter your Fireworks API key into the API credential textbox
+4. Select a model (MiniMax M3 is recommended if API credits are limited)
+5. Click the "Connect API Key" button
+6. If the key is valid, it will say "API key connected successfully — minimax-m3 is ready."
+7. Upload a document
+8. An editor box should appear
+9. On the AI redaction sidebar, click on "Run AI privacy scan"
+10. The AI should return suggested redactions. Manually review and approve these suggestions
+11. Export and download redacted file
+
+---
+
 ## Confidence threshold
 
 The confidence slider controls which AI suggestions are shown.
@@ -172,9 +177,9 @@ A lower value increases recall but may show more false positives. A higher value
 Suggested starting points:
 
 ```text
-0.55–0.65  Higher recall and more manual review
-0.70–0.80  Balanced review
-0.85–0.95  Only high-confidence suggestions
+0.55–0.70  Higher recall and more manual review
+0.70–0.85  Balanced review
+0.85+  Only high-confidence suggestions
 ```
 
 The confidence score is a review aid, not a guarantee that a finding is correct.
@@ -214,11 +219,8 @@ This is just a working prototype. Some features have not been fully developed.
 * Password-protected PDFs are not supported.
 * OCR accuracy depends on image quality.
 * Handwriting detection is limited.
-* Face detection may miss profiles, obscured faces or very small photographs.
+* Face detection has not been fully developed
 * Vision-model bounding boxes may be approximate.
 * AI confidence is not a security guarantee.
-* Large multi-page documents may require significant API usage.
 * Malformed PDFs may prevent optional deep sanitisation.
 * The model can miss context-dependent information.
-* Training examples do not automatically fine-tune model weights.
-* The final output must always be manually inspected.
